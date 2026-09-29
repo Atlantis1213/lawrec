@@ -1,0 +1,113 @@
+#!/bin/sh
+#
+# Start the lawrec LVGL UI on the little core.
+#
+
+APP_DIR=/app/lawrec/ui
+APP_BIN=${APP_DIR}/ui
+PIDFILE=/var/run/lawrec-ui.pid
+LOGFILE=/tmp/lawrec-service.log
+FAILSTAMP=/var/run/lawrec-ui.failed
+AUTOSTART_ENABLE_FILE=/etc/lawrec-ui.autostart
+
+log() {
+    echo "[lawrec-ui] $*" >>"${LOGFILE}"
+}
+
+wait_for_node() {
+    node="$1"
+    timeout="${2:-50}"
+    i=0
+    while [ "$i" -lt "$timeout" ]; do
+        [ -e "$node" ] && return 0
+        sleep 0.2
+        i=$((i + 1))
+    done
+    return 1
+}
+
+start() {
+    mkdir -p /var/run
+
+    if [ ! -f "${AUTOSTART_ENABLE_FILE}" ]; then
+        log "autostart disabled, skip launch"
+        return 0
+    fi
+
+    if [ -f "${FAILSTAMP}" ]; then
+        log "previous start failure recorded, skip auto restart"
+        return 0
+    fi
+
+    if pidof touch_emu >/dev/null 2>&1; then
+        log "stop legacy touch_emu"
+        killall touch_emu >/dev/null 2>&1
+    fi
+
+    if [ -x "${APP_BIN}" ]; then
+        : >"${LOGFILE}"
+        rm -f "${FAILSTAMP}"
+        start-stop-daemon -S -b -m -p "${PIDFILE}" --startas /bin/sh -- -c '
+            APP_BIN="$1"
+            LOGFILE="$2"
+            FAILSTAMP="$3"
+
+            log_inner() {
+                echo "[lawrec-ui] $*" >>"${LOGFILE}"
+            }
+
+            wait_for_node_inner() {
+                node="$1"
+                timeout="${2:-50}"
+                i=0
+                while [ "$i" -lt "$timeout" ]; do
+                    [ -e "$node" ] && return 0
+                    sleep 0.2
+                    i=$((i + 1))
+                done
+                return 1
+            }
+
+            log_inner "wait for /dev/dri/card0"
+            wait_for_node_inner /dev/dri/card0 100 || log_inner "/dev/dri/card0 timeout"
+            wait_for_node_inner /dev/ipcm_user 100 || log_inner "/dev/ipcm_user timeout"
+            log_inner "launch ${APP_BIN}"
+            "${APP_BIN}" >>"${LOGFILE}" 2>&1
+            rc=$?
+            log_inner "ui exit rc=${rc}"
+            if [ "${rc}" -ne 0 ]; then
+                : >"${FAILSTAMP}"
+                log_inner "record failstamp ${FAILSTAMP}"
+            fi
+            exit "${rc}"
+        ' sh "${APP_BIN}" "${LOGFILE}" "${FAILSTAMP}"
+    fi
+}
+
+stop() {
+    if [ -f "${PIDFILE}" ]; then
+        start-stop-daemon -K -p "${PIDFILE}"
+        rm -f "${PIDFILE}"
+    fi
+    killall lawrec_service >/dev/null 2>&1 || true
+    rm -f "${FAILSTAMP}"
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop
+        start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
+
+exit 0

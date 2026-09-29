@@ -1,0 +1,6 @@
+/out/
+/baseline/
+**/out/
+**/build/
+*.o
+*.elf
