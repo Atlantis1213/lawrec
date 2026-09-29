@@ -23,6 +23,8 @@ file(GLOB CONTROL_SRC
     "${CMAKE_CURRENT_LIST_DIR}/../control/src/*.cpp")
 
 add_executable(${EXE_TARGET}
+    ../common/lawrec_storage.cpp
+    ../common/lawrec_media.cpp
     src/main.cpp
     ${CONTROL_SRC}
     ${RECORD_SRC}

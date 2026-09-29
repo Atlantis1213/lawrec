@@ -28,9 +28,18 @@
 #include <pthread.h>
 #include <sched.h>
 #include <unistd.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <sys/file.h>
 #include "lv_port.h"
 #include "key_proc.h"
 #include "../../control/include/lawrec_control.h"
+#include "../../record/include/lawrec_record_entry.h"
+#include "../../rtsp/include/lawrec_rtsp_entry.h"
+
+static volatile sig_atomic_t stop_requested;
+static void stop_signal(int signo) { (void)signo; stop_requested = 1; }
 
 static int set_priority(void)
 {
@@ -59,26 +68,34 @@ static void setup_log_streams(void)
      * UI 日志故意重定向到小核统一日志中。
      * 现场调试时，UI/service/control 共用一条时间线会更容易排查问题。
      */
-    fp = freopen("/tmp/lawrec-service.log", "a", stdout);
+    fp = freopen(LAWREC_LOG_PATH, "a", stdout);
     if (fp != NULL)
         setvbuf(stdout, NULL, _IOLBF, 0);
 
-    fp = freopen("/tmp/lawrec-service.log", "a", stderr);
+    fp = freopen(LAWREC_LOG_PATH, "a", stderr);
     if (fp != NULL)
         setvbuf(stderr, NULL, _IOLBF, 0);
 }
 
 int main(void)
 {
+    int lock_fd = open("/var/run/lawrec-ui.lock", O_CREAT | O_RDWR, 0600);
+    if (lock_fd < 0 || flock(lock_fd, LOCK_EX | LOCK_NB)) {
+        fprintf(stderr, "lawrec: another UI instance owns the device or lock unavailable\n");
+        return 1;
+    }
+    signal(SIGTERM, stop_signal);
+    signal(SIGINT, stop_signal);
+    signal(SIGPIPE, SIG_IGN);
     set_mallopt();
     setup_log_streams();
-    fprintf(stderr, "lawrec ui build: 2026-04-15 ui-layout-v9 touch-off dhcp\n");
+    fprintf(stderr, "lawrec ui build: v1.0.0-rc1 single-process " __DATE__ " " __TIME__ "\n");
 
     /*
      * UI 侧也要初始化 control，
      * 因为预览页和 RTSP 按钮会在异步消息前后直接读取共享状态。
      */
-    lawrec_control_set_log_path("/tmp/lawrec-service.log");
+    lawrec_control_set_log_path(LAWREC_LOG_PATH);
     lawrec_control_init();
     lv_init();
     lv_port_disp_init();
@@ -86,7 +103,10 @@ int main(void)
 
     setup_scr_scr_main();
     lawrec_key_init();
-    msg_proc_init();
+    if (msg_proc_init() != 0) {
+        fprintf(stderr, "lawrec: message initialization failed\n");
+        _Exit(1);
+    }
     set_priority();
     jump_to_scr_main();
     /*
@@ -95,12 +115,19 @@ int main(void)
      * 2. 轮询 GPIO 按键并转成 UI 动作
      * 3. 处理异步 IPC/service 结果并刷新界面状态
      */
-    while (1) {
+    while (!stop_requested) {
         lv_timer_handler();
         lawrec_key_poll();
         if (ui_msg_proc() < 0)
             usleep(1 * 1000);
     }
 
-    return 0;
+    lawrec_control_note_preview_request(0);
+    int record_ret = lawrec_record_stop_wait(5000);
+    int rtsp_ret = lawrec_rtsp_stop_wait(5000);
+    fprintf(stderr, "lawrec shutdown record=%d rtsp=%d\n", record_ret, rtsp_ret);
+    fflush(NULL);
+    /* SDK IPC/input threads live for process lifetime; avoid C++ static
+       destruction racing those threads after the media workers are drained. */
+    _Exit(record_ret || rtsp_ret ? 1 : 0);
 }

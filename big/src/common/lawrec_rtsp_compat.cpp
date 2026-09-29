@@ -12,10 +12,8 @@ LawrecRtspCompat::LawrecRtspCompat(uint32_t port, const char *stream_name)
 
 int LawrecRtspCompat::StartRequested()
 {
-    requested_.store(true);
-    printf("[lawrec] rtsp request accepted on big core compatibility path; "
-           "small core service owns the RTSP server\n");
-    return 0;
+    printf("[lawrec] unsupported: Linux application owns RTSP\n");
+    return -1;
 }
 
 int LawrecRtspCompat::StopRequested()

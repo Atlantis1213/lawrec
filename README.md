@@ -2,7 +2,8 @@
 
 Business sources live here. The K230 SDK supplies platform libraries, toolchains,
 Buildroot and image packaging. Migration preserves the current application logic;
-the UI/service refactor is still incomplete.
+V1 uses one Linux business process. Standalone service is disabled; see
+`docs/v1_验收与部署.md` for scope and pending hardware acceptance.
 
 ## Layout
 
@@ -22,6 +23,7 @@ Run from this directory:
 export K230_SDK_ROOT=/home/atlantis/k230_sdk
 bash tools/build.sh little
 bash tools/build.sh big
+bash tools/test.sh
 ```
 
 The default board is `k230_canmv_lckfb_defconfig`. Override `LAWREC_BOARD` when
@@ -31,6 +33,10 @@ UID/GID. Existing root-owned SDK outputs may need their ownership repaired first
 Big-core output: `out/big/lawrec.elf`.
 Little-core output: `$K230_SDK_ROOT/output/$LAWREC_BOARD/little/buildroot-ext/target/app/lawrec/`.
 These commands do not deploy to a board or rebuild the SD image.
+
+After committing reviewed sources, `bash tools/package.sh` builds a versioned
+candidate package with checksums. Storage must be provisioned on a confirmed
+persistent filesystem; configure `/etc/lawrec-record-dir` before recording.
 
 ## SDK integration
 

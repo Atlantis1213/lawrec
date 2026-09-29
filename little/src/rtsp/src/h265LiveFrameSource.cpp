@@ -86,9 +86,9 @@ H265LiveFrameSource::parseFrame(std::shared_ptr<uint8_t> data, size_t data_size,
             os << ";sprop-parameter-sets=" << vps_base64 << "," << sps_base64 << "," << pps_base64 << ";";
             fAuxLine.assign(os.str());
 
-            free(vps_base64);
-            free(sps_base64);
-            free(pps_base64);
+            delete[] vps_base64;
+            delete[] sps_base64;
+            delete[] pps_base64;
             // std::cout << "H265 SDP-aux-line: " << fAuxLine.c_str() << std::endl;
         }
         FramePacket packet(data, buffer - data.get(), size, ref);

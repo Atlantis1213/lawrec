@@ -2,6 +2,8 @@
 #include <chrono>
 #include <thread>
 #include "streaming_player.h"
+#include "../../common/lawrec_media.h"
+#include "../../common/lawrec_config.h"
 
 #define AUDIO_PERSEC_DIV_NUM 25
 #define VI_ALIGN_UP(addr, size) (((addr)+((size)-1U))&(~((size)-1U)))
@@ -51,7 +53,7 @@ StreamingPlayer::StreamingPlayer(const k_vicap_sensor_type &sensor_type,
       video_height_(video_height),
       session_num_(session_num),
       sensor_type_(sensor_type) {
-    if (session_num_ < 1 || session_num_ > MAX_SESSION_NUM) {
+    if (session_num_ < 1 || session_num_ > 1) {
         std::cout << "[lawrec-rtsp] invalid session_num=" << session_num_
                   << std::endl;
         init_ret_ = -1;
@@ -89,7 +91,7 @@ StreamingPlayer::StreamingPlayer(const k_vicap_sensor_type &sensor_type,
     std::cout << "[lawrec-rtsp] create rtsp server begin" << std::endl;
     UserAuthenticationDatabase* authDB = nullptr;
     unsigned reclamationSeconds = 10;
-    rtspServer_ = RTSPServer::createNew(*env_, 8554, authDB, reclamationSeconds);
+    rtspServer_ = RTSPServer::createNew(*env_, LAWREC_RTSP_DEFAULT_PORT, authDB, reclamationSeconds);
     if (!rtspServer_) {
         *env_ << "create rtsp server failed." << env_->getResultMsg() << "\n";
         env_->reclaim();
@@ -122,11 +124,15 @@ StreamingPlayer::StreamingPlayer(const k_vicap_sensor_type &sensor_type,
     std::cout << "[lawrec-rtsp] ctor ready" << std::endl;
 }
 
-static k_s32 sessionVideoCallback(k_u32 chn_num, kd_venc_data_s* p_vstream_data, k_u8 *p_private_data) {
+static k_s32 sessionVideoCallback(k_u32 chn_num, kd_venc_data_s* p_vstream_data, k_u8 *p_private_data) try {
+    if (!p_vstream_data || !p_vstream_data->status.cur_packs ||
+        p_vstream_data->status.cur_packs > KD_VENC_MAX_FRAME_PACKCOUNT) return -1;
     if (g_rtsp_stopping.load() || chn_num >= MAX_SESSION_NUM ||
         session_info[chn_num].sessionVideoLiveSource == nullptr) {
         return 0;
     }
+    for (unsigned i = 0; i < p_vstream_data->status.cur_packs; ++i)
+        if (!p_vstream_data->astPack[i].vir_addr || !p_vstream_data->astPack[i].len) return -1;
     unsigned long cb_count = ++g_video_cb_count[chn_num];
     if (cb_count <= 3 || (cb_count % 120) == 0) {
         printf("[lawrec-rtsp] video cb chn=%u count=%lu packs=%u pts=%llu len0=%u\n",
@@ -151,6 +157,12 @@ static k_s32 sessionVideoCallback(k_u32 chn_num, kd_venc_data_s* p_vstream_data,
     return 0;
 }
 
+catch (...) {
+    g_rtsp_stopping.store(true);
+    fprintf(stderr, "[rtsp] video callback allocation failure\n");
+    return -1;
+}
+
 static k_s32 sessionAudioCallback(k_u32 chn_num, k_audio_stream* stream_data, void* p_private_data) {
     if (g_rtsp_stopping.load() || audio_session.g711LiveSource == nullptr)
         return 0;
@@ -166,136 +178,32 @@ static k_s32 sessionAudioCallback(k_u32 chn_num, k_audio_stream* stream_data, vo
 }
 
 int StreamingPlayer::StreamingPlayerInit() {
-    std::cout << "[lawrec-rtsp] StreamingPlayerInit enter" << std::endl;
-    media_reused_ = false;
-    owns_vicap_ = true;
-    server_loop_started_ = false;
-
-    int ret = K_FAILED;
-    for (int attempt = 1; attempt <= 20; ++attempt) {
-        std::cout << "[lawrec-rtsp] kd_mapi_sys_init attempt=" << attempt
-                  << std::endl;
-        ret = kd_mapi_sys_init();
-        if (ret == K_SUCCESS) {
-            break;
-        }
-        std::cout << "[lawrec-rtsp] kd_mapi_sys_init pending ret=" << ret
-                  << std::endl;
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    }
-    if (ret != K_SUCCESS) {
-        std::cout << "[lawrec-rtsp] kd_mapi_sys_init error ret=" << ret << std::endl;
-        return ret;
-    }
-    std::cout << "[lawrec-rtsp] kd_mapi_sys_init ok" << std::endl;
-
-    memset(&dev_attr_info_, 0, sizeof(dev_attr_info_));
-    if (sensor_type_ <= OV_OV9286_MIPI_1280X720_60FPS_10BIT_LINEAR_IR_SPECKLE || sensor_type_ >= SC_SC035HGS_MIPI_1LANE_RAW10_640X480_120FPS_LINEAR)
-        dev_attr_info_.dw_en = K_FALSE;
-    else
-        dev_attr_info_.dw_en = K_TRUE;
-
-    memset(&media_attr_, 0, sizeof(media_attr_));
-    k_u64 pic_size = video_width_ * video_height_ * 2;
-    k_u64 stream_size = video_width_ * video_height_ / 2;
-    media_attr_.media_config.vb_config.max_pool_cnt = session_num_ * 2 + 2 + 1;
-    for (int i = 0; i < session_num_ * 2; i++) {
-        if (i % 2 == 0) {
-            media_attr_.media_config.vb_config.comm_pool[i].blk_cnt = 10;
-            media_attr_.media_config.vb_config.comm_pool[i].blk_size = ((pic_size + 0xfff) & ~0xfff);
-            media_attr_.media_config.vb_config.comm_pool[i].mode = VB_REMAP_MODE_NOCACHE;
-        } else {
-            media_attr_.media_config.vb_config.comm_pool[i].blk_cnt = 30;
-            media_attr_.media_config.vb_config.comm_pool[i].blk_size = ((stream_size + 0xfff) & ~0xfff);
-            media_attr_.media_config.vb_config.comm_pool[i].mode = VB_REMAP_MODE_NOCACHE;
-        }
-    }
-
-    // auido
-    media_attr_.media_config.vb_config.comm_pool[session_num_ * 2].blk_cnt = 150;
-    media_attr_.media_config.vb_config.comm_pool[session_num_ * 2].blk_size = audio_sample_rate_ * 2 * 4 / AUDIO_PERSEC_DIV_NUM;
-    media_attr_.media_config.vb_config.comm_pool[session_num_ * 2].mode = VB_REMAP_MODE_CACHED;
-    media_attr_.media_config.vb_config.comm_pool[session_num_ * 2 + 1].blk_cnt = 2;
-    media_attr_.media_config.vb_config.comm_pool[session_num_ * 2 + 1].blk_size = audio_sample_rate_ * 2 * 4 / AUDIO_PERSEC_DIV_NUM * 2;
-    media_attr_.media_config.vb_config.comm_pool[session_num_ * 2 + 1].mode = VB_REMAP_MODE_CACHED;
-
-    if (dev_attr_info_.dw_en) {
-        k_vicap_sensor_info sensor_info;
-        memset(&sensor_info, 0, sizeof(sensor_info));
-        sensor_info.sensor_type = sensor_type_;
-        ret = kd_mapi_vicap_get_sensor_info(&sensor_info);
-        if (ret != K_SUCCESS) {
-            printf("kd_mapi_vicap_get_sensor_info failed, %x.\n", ret);
-            return -1;
-        }
-        printf("sensor type: %u, name: %p, width: %u, height: %u\n",
-            sensor_type_, sensor_info.sensor_name, sensor_info.width, sensor_info.height);
-        media_attr_.media_config.vb_config.comm_pool[session_num_ * 2 + 2].blk_cnt = 6;
-        media_attr_.media_config.vb_config.comm_pool[session_num_ * 2 + 2].blk_size = VI_ALIGN_UP(sensor_info.width * sensor_info.height * 3 / 2, 0x1000);
-        media_attr_.media_config.vb_config.comm_pool[session_num_ * 2 + 2].mode = VB_REMAP_MODE_NOCACHE;
-    }
-
-    memset(&media_attr_.media_config.vb_supp.supplement_config, 0, sizeof(media_attr_.media_config.vb_supp.supplement_config));
-    media_attr_.media_config.vb_supp.supplement_config |= VB_SUPPLEMENT_JPEG_MASK;
-    ret = kd_mapi_media_init(&media_attr_);
-    if (ret == kLawrecMapiMediaAlreadyInitialized) {
-        kd_mapi_media_init_workaround(K_TRUE);
-        ret = K_SUCCESS;
-        media_reused_ = true;
-        owns_vicap_ = false;
-        std::cout << "[lawrec-rtsp] kd_mapi_media_init reuse existing vb/media" << std::endl;
-    }
-    if (ret != K_SUCCESS) {
-        std::cout << "kd_mapi_media_init error ret=" << ret << std::endl;
-        goto sys_deinit;
-    }
-    std::cout << "[lawrec-rtsp] kd_mapi_media_init ok" << std::endl;
-
-    if (!media_reused_) {
-        dev_attr_info_.pipe_ctrl.data = 0xFFFFFFFF;
-        dev_attr_info_.sensor_type = sensor_type_;
-        dev_attr_info_.vicap_dev = VICAP_DEV_ID_0;
-        ret = kd_mapi_vicap_set_dev_attr(dev_attr_info_);
-        if (ret != K_SUCCESS) {
-            printf("kd_mapi_vicap_set_dev_attr failed.\n", ret);
-            goto media_deinit;
-        }
-        std::cout << "[lawrec-rtsp] kd_mapi_vicap_set_dev_attr ok" << std::endl;
-    } else {
-        std::cout << "[lawrec-rtsp] skip vicap dev attr, reuse big-core pipeline"
-                  << std::endl;
-    }
-
-    return ret;
-
-media_deinit:
-    if (!media_reused_) {
-        kd_mapi_media_deinit();
-    }
-
-sys_deinit:
-    kd_mapi_sys_deinit();
-
+    int ret = lawrec_media_acquire(1);
+    media_reused_ = true;
+    owns_vicap_ = false;
     return ret;
 }
 
 int StreamingPlayer::StreamingPlayerDeinit() {
-    if (!media_reused_) {
-        kd_mapi_media_deinit();
-    }
-    kd_mapi_sys_deinit();
-
+    if (!cleanup_error_) lawrec_media_release(1);
+    else std::cerr << "[rtsp] cleanup failed; restart required error=" << cleanup_error_ << std::endl;
+    init_ok_ = false;
     return 0;
 }
 
-void StreamingPlayer::Start() {
+int StreamingPlayer::Start() {
+    started_ = true;
     std::cout << "[lawrec-rtsp] Start() enter" << std::endl;
     g_rtsp_stopping.store(false);
     watchVariable_ = 0;
     for (int i = 0; i < session_num_; i++) {
         int ret = kd_mapi_venc_start(i, -1);
         std::cout << "[lawrec-rtsp] kd_mapi_venc_start chn=" << i << " ret=" << ret << std::endl;
+        if (ret != K_SUCCESS) return ret;
+        venc_started_[i] = true;
         ret = kd_mapi_venc_bind_vi(0, kLawrecRtspVicapChn, i);
+        if (ret != K_SUCCESS) return ret;
+        venc_bound_[i] = true;
         std::cout << "[lawrec-rtsp] kd_mapi_venc_bind_vi vicap_chn="
                   << static_cast<int>(kLawrecRtspVicapChn)
                   << " venc_chn=" << i << " ret=" << ret << std::endl;
@@ -322,12 +230,16 @@ void StreamingPlayer::Start() {
         *env_ << "\n(RTSP-over-HTTP tunneling is not available.)\n";
     }
 
+    wake_event_ = scheduler_->createEventTrigger([](void *opaque) {
+        static_cast<StreamingPlayer *>(opaque)->watchVariable_ = 1;
+    });
     server_loop_ = std::thread([this]() {
         env_->taskScheduler().doEventLoop(&watchVariable_);
     });
     server_loop_started_ = true;
     started_ = true;
     std::cout << "[lawrec-rtsp] Start() leave" << std::endl;
+    return 0;
 }
 
 void StreamingPlayer::Stop() {
@@ -339,14 +251,19 @@ void StreamingPlayer::Stop() {
 
     g_rtsp_stopping.store(true);
 
-    watchVariable_ = 1;
+    if (wake_event_) scheduler_->triggerEvent(wake_event_, this);
     if (server_loop_started_ && server_loop_.joinable()) {
         server_loop_.join();
     }
     server_loop_started_ = false;
 
-    for (int i = 0; i < session_num_; i++)
-        kd_mapi_venc_unbind_vi(0, kLawrecRtspVicapChn, i);
+    for (int i = 0; i < session_num_; i++) {
+        if (venc_bound_[i]) {
+            int ret = kd_mapi_venc_unbind_vi(0, kLawrecRtspVicapChn, i);
+            if (ret) cleanup_error_ = ret;
+            venc_bound_[i] = false;
+        }
+    }
 
     if (owns_vicap_) {
         kd_mapi_vicap_stop(VICAP_DEV_ID_0);
@@ -354,8 +271,13 @@ void StreamingPlayer::Stop() {
         std::cout << "[lawrec-rtsp] skip vicap stop, big-core owns device" << std::endl;
     }
 
-    for (int i = 0; i < session_num_; i++)
-        kd_mapi_venc_stop(i);
+    for (int i = 0; i < session_num_; i++) {
+        if (venc_started_[i]) {
+            int ret = kd_mapi_venc_stop(i);
+            if (ret) cleanup_error_ = ret;
+            venc_started_[i] = false;
+        }
+    }
 
     if (audio_created_) {
         kd_mapi_aenc_unbind_ai(ai_handle, 0);
@@ -367,12 +289,15 @@ void StreamingPlayer::Stop() {
 }
 
 int StreamingPlayer::CreateSession(const SessionAttr &session_attr) {
-    char const* descriptionString = "Session streamed by \"testOnDemandRTSPServer\"";
+    char const* descriptionString = "Lawrec H.264 video";
     std::string streamName = session_attr.session_name;
     std::cout << "[lawrec-rtsp] CreateSession enter idx="
               << session_attr.session_idx
               << " stream=" << streamName << std::endl;
     ServerMediaSession *sms = ServerMediaSession::createNew(*env_, streamName.c_str(), streamName.c_str(), descriptionString);
+    if (!sms) return -1;
+    std::unique_ptr<ServerMediaSession, void(*)(ServerMediaSession*)> guard(
+        sms, [](ServerMediaSession *p) { Medium::close(p); });
     session_info[session_attr.session_idx].sessionName = streamName;
 
     if (audio_enabled_ && !audio_created_) {
@@ -407,6 +332,7 @@ int StreamingPlayer::CreateSession(const SessionAttr &session_attr) {
     }
 
     rtspServer_->addServerMediaSession(sms);
+    guard.release();
     announceStream(sms, session_attr.session_name.c_str());
     std::cout << "[lawrec-rtsp] CreateSession leave idx="
               << session_attr.session_idx
@@ -455,6 +381,7 @@ int StreamingPlayer::CreateVideoEncode(const SessionAttr &session_attr) {
         return -1;
     }
     std::cout << "[lawrec-rtsp] kd_mapi_venc_init idx=" << session_attr.session_idx << " ok" << std::endl;
+    venc_initialized_[session_attr.session_idx] = true;
 
     if (session_attr.video_type != kVideoTypeMjpeg) {
         ret = kd_mapi_venc_enable_idr(session_attr.session_idx, K_TRUE);
@@ -470,7 +397,10 @@ int StreamingPlayer::CreateVideoEncode(const SessionAttr &session_attr) {
     venc_callback.p_private_data = nullptr;
     venc_callback.pfn_data_cb = sessionVideoCallback;
     ret = kd_mapi_venc_registercallback(session_attr.session_idx, &venc_callback);
+    if (ret == K_SUCCESS) callback_registered_[session_attr.session_idx] = true;
     std::cout << "[lawrec-rtsp] kd_mapi_venc_registercallback idx=" << session_attr.session_idx << " ret=" << ret << std::endl;
+
+    if (ret != K_SUCCESS) return ret;
 
     if (!media_reused_) {
         k_vicap_sensor_info sensor_info;
@@ -563,6 +493,13 @@ int StreamingPlayer::CreateAudioEncode(const SessionAttr &session_attr) {
 }
 
 int StreamingPlayer::DestroySession(int session_idx) {
+    if (session_idx < 0 || session_idx >= MAX_SESSION_NUM) return -1;
+    if (callback_registered_[session_idx]) {
+        kd_venc_callback_s cb{};
+        int ret = kd_mapi_venc_unregistercallback(session_idx, &cb);
+        if (ret) { cleanup_error_ = ret; std::cerr << "[rtsp] unregister error=" << ret << std::endl; }
+        callback_registered_[session_idx] = false;
+    }
     std::cout << "[lawrec-rtsp] DestroySession idx=" << session_idx << " begin" << std::endl;
 
     if (rtspServer_ != nullptr && !session_info[session_idx].sessionName.empty()) {
@@ -574,7 +511,11 @@ int StreamingPlayer::DestroySession(int session_idx) {
 
     std::cout << "[lawrec-rtsp] kd_mapi_venc_deinit idx=" << session_idx
               << " begin" << std::endl;
-    kd_mapi_venc_deinit(session_idx);
+    if (venc_initialized_[session_idx]) {
+        int ret = kd_mapi_venc_deinit(session_idx);
+        if (ret) cleanup_error_ = ret;
+    }
+    venc_initialized_[session_idx] = false;
     std::cout << "[lawrec-rtsp] kd_mapi_venc_deinit idx=" << session_idx
               << " done" << std::endl;
 
@@ -595,6 +536,9 @@ int StreamingPlayer::DestroySession(int session_idx) {
     }
 
     if (session_info[session_idx].sessionVideoReplicator) {
+        if (session_info[session_idx].sessionVideoType == kVideoTypeH264 ||
+            session_info[session_idx].sessionVideoType == kVideoTypeH265)
+            static_cast<LiveFrameSource *>(session_info[session_idx].sessionVideoLiveSource)->stopReader();
         std::cout << "[lawrec-rtsp] close video replicator idx=" << session_idx
                   << " begin" << std::endl;
         if (session_info[session_idx].sessionVideoType ==  kVideoTypeMjpeg)
@@ -661,4 +605,10 @@ void StreamingPlayer::announceStream(ServerMediaSession* sms, char const* stream
     env << "Play this stream using the URL \"" << url << "\"\n";
     delete[] url;
 
+}
+
+unsigned long StreamingPlayer::FrameCount() const { return g_video_cb_count[0].load(); }
+bool StreamingPlayer::Overflowed() const {
+    auto *source = static_cast<LiveFrameSource *>(session_info[0].sessionVideoLiveSource);
+    return source && source->overflowed();
 }

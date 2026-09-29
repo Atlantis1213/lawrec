@@ -36,7 +36,7 @@ LAWREC_CONF_OPTS += \
 	-DLAWREC_MPP_COMM_INC_DIR="$(LAWREC_MPP_COMM_INC)" \
 	-DLAWREC_IPCMSG_LIB_DIR="$(LAWREC_SDK_ROOT)/src/common/cdk/user/component/ipcmsg/host/lib" \
 	-DLAWREC_SDK_ROOT="$(LAWREC_SDK_ROOT)" \
-	-DLAWREC_BUILD_SERVICE=ON \
+	-DLAWREC_BUILD_SERVICE=OFF \
 	-DCMAKE_CXX_FLAGS="$(LAWREC_CXXFLAGS)" \
 	-DCMAKE_C_FLAGS="$(LAWREC_CFLAGS)" \
 	-DNATIVE_BUILD=OFF
@@ -54,6 +54,7 @@ define LAWREC_EXTRACT_CMDS
 endef
 
 LAWREC_PRE_BUILD_HOOKS += lawrec_pre_build_hook
+LAWREC_PRE_CONFIGURE_HOOKS += lawrec_pre_build_hook
 define lawrec_pre_build_hook
 	$(call lawrec_rsync)
 endef
@@ -64,6 +65,8 @@ define lawrec_install_init_script
 	rm -f $(TARGET_DIR)/app/lawrec/rtsp_start.sh
 	rm -f $(TARGET_DIR)/app/lawrec/rtsp_stop.sh
 	rm -f $(TARGET_DIR)/app/lawrec/rtsp_status.sh
+	rm -f $(TARGET_DIR)/app/lawrec/service/lawrec_service
+	rm -f $(TARGET_DIR)/app/lawrec/xiaodemo/xiaodemo
 endef
 
 $(eval $(cmake-package))

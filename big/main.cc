@@ -8,6 +8,7 @@
 #include "mobile_face.h"
 #include "lawrec_rtsp_compat.h"
 #include "lawrec_preview.h"
+#include "../little/src/common/lawrec_preview_wire.h"
 #include "util.h"
 #include "mpi_sys_api.h"
 
@@ -288,10 +289,11 @@ static int ipc_send_payload(ipc_msg_cmd_t cmd, const void *content, uint32_t con
 
     pReq = kd_ipcmsg_create_message(SEND_ONLY_MODULE_ID, cmd,
                                     const_cast<void *>(content), content_size);
-    kd_ipcmsg_send_only(s32Id1, pReq);
+    if (!pReq) return -1;
+    int ret = kd_ipcmsg_send_only(s32Id1, pReq);
     kd_ipcmsg_destroy_message(pReq);
-    usleep(SEND_TIME_INTERVAL_US * 3);
-    return 0;
+    if (ret) printf("[lawrec] ipc send cmd=%u error=%d\n", cmd, ret);
+    return ret;
 }
 
 static int lawrec_rtsp_start(void)
@@ -412,6 +414,32 @@ int ipc_send_thread(ipc_msg_cmd_t cmd)
 
 void handle_feature(k_s32 s32Id, k_ipcmsg_message_t* msg)
 {
+    if (!msg || (msg->u32BodyLen && !msg->pBody)) return;
+    if (msg->u32CMD == MSG_CMD_RTSP_START || msg->u32CMD == MSG_CMD_RTSP_STOP ||
+        msg->u32CMD == MSG_CMD_RTSP_QUERY) {
+        printf("[lawrec] unsupported RTSP business cmd=%u; Linux owns network output\n", msg->u32CMD);
+        int8_t error = -1;
+        ipc_send_payload(MSG_CMD_ERROR, &error, 1);
+        return;
+    }
+    if (msg->u32CMD == MSG_CMD_IMPORT || msg->u32CMD == MSG_CMD_SIGNUP) {
+        if (!msg->pBody || !msg->u32BodyLen || msg->u32BodyLen > sizeof(dir_name) ||
+            !memchr(msg->pBody, 0, msg->u32BodyLen)) return;
+    }
+    if (msg->u32CMD == MSG_CMD_PREVIEW_ENTER || msg->u32CMD == MSG_CMD_PREVIEW_EXIT) {
+        if (!msg->pBody || msg->u32BodyLen != sizeof(lawrec_preview_wire_t)) {
+            printf("[lawrec] reject preview protocol length; update both cores\n");
+            return;
+        }
+        lawrec_preview_wire_t wire;
+        memcpy(&wire, msg->pBody, sizeof(wire));
+        if (wire.version != LAWREC_PREVIEW_WIRE_VERSION) return;
+        wire.result = msg->u32CMD == MSG_CMD_PREVIEW_ENTER ? lawrec_preview_enter() : lawrec_preview_exit();
+        printf("[lawrec] preview cmd=%u seq=%u result=%d\n", msg->u32CMD, wire.sequence, wire.result);
+        ipc_send_payload(msg->u32CMD == MSG_CMD_PREVIEW_ENTER ? MSG_CMD_PREVIEW_ENTER_RESULT : MSG_CMD_PREVIEW_EXIT_RESULT,
+                         &wire, sizeof(wire));
+        return;
+    }
     k_s32 s32Ret = 0;
     char content[64];
 
@@ -482,20 +510,18 @@ void handle_feature(k_s32 s32Id, k_ipcmsg_message_t* msg)
             ipc_send_payload(MSG_CMD_RTSP_STATUS, &status, sizeof(status));
             break;
         }
-        case MSG_CMD_PREVIEW_ENTER:
+        case MSG_CMD_PREVIEW_ENTER: {
             printf("[lawrec] ipc preview enter\n");
-            if (lawrec_preview_enter() == 0)
-                ipc_send_thread(MSG_CMD_PREVIEW_ENTER_RESULT);
-            else
-                ipc_send_thread(MSG_CMD_ERROR);
+            int8_t result = lawrec_preview_enter() == 0 ? 0 : -1;
+            ipc_send_payload(MSG_CMD_PREVIEW_ENTER_RESULT, &result, sizeof(result));
             break;
-        case MSG_CMD_PREVIEW_EXIT:
+        }
+        case MSG_CMD_PREVIEW_EXIT: {
             printf("[lawrec] ipc preview exit\n");
-            if (lawrec_preview_exit() == 0)
-                ipc_send_thread(MSG_CMD_PREVIEW_EXIT_RESULT);
-            else
-                ipc_send_thread(MSG_CMD_ERROR);
+            int8_t result = lawrec_preview_exit() == 0 ? 0 : -1;
+            ipc_send_payload(MSG_CMD_PREVIEW_EXIT_RESULT, &result, sizeof(result));
             break;
+        }
         default:
             printf("can not recongnise ipc_msg cmd\n");
             break;

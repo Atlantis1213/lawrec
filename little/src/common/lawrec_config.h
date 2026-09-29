@@ -17,7 +17,7 @@
 #define LAWREC_SERVICE_SOCKET_PATH "/var/run/lawrec-service.sock"
 #define LAWREC_SERVICE_PID_PATH "/var/run/lawrec-service.pid"
 #define LAWREC_UI_PID_PATH "/var/run/lawrec-ui.pid"
-#define LAWREC_LOG_PATH "/tmp/lawrec-service.log"
+#define LAWREC_LOG_PATH "/tmp/lawrec.log"
 #define LAWREC_RTSP_LOG_PATH "/tmp/lawrec-rtsp.log"
 
 #define LAWREC_RTSP_DEFAULT_PORT 8554
@@ -28,7 +28,7 @@
 #define LAWREC_RTSP_DEFAULT_HEIGHT 720
 #define LAWREC_RTSP_DEFAULT_AUDIO_INPUT 0
 
-#define LAWREC_RECORD_DEFAULT_OUTPUT_DIR "/tmp/lawrec_records"
+#define LAWREC_RECORD_DEFAULT_OUTPUT_DIR "/sharefs/lawrec_records"
 #define LAWREC_RECORD_DEFAULT_PREFIX "lawrec"
 
 #endif

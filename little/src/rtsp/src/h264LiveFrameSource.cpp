@@ -2,6 +2,7 @@
 #include "Base64.hh"
 #include <iomanip>
 #include "h264LiveFrameSource.h"
+#include "../../common/lawrec_annexb.h"
 
 H264LiveFrameSource* H264LiveFrameSource::createNew(UsageEnvironment &env, size_t queue_size) {
     return new H264LiveFrameSource(env, queue_size);
@@ -12,21 +13,7 @@ H264LiveFrameSource::H264LiveFrameSource(UsageEnvironment &env, size_t queue_siz
 
 const uint8_t H264marker[] = {0, 0, 0, 1};
 uint8_t *H264LiveFrameSource::extractFrame(uint8_t *frame, size_t &size, size_t &outsize) {
-    unsigned char *outFrame = NULL;
-    outsize = 0;
-    if ((size >= sizeof(H264marker)) && (memcmp(frame, H264marker, sizeof(H264marker)) == 0)) {
-        size -= sizeof(H264marker);
-        outFrame = &frame[sizeof(H264marker)];
-        outsize = size;
-        for (int i = 0; i + sizeof(H264marker) < size; ++i) {
-            if (memcmp(&outFrame[i], H264marker, sizeof(H264marker)) == 0) {
-                outsize = (size_t) i;
-                break;
-            }
-        }
-        size -= outsize;
-    }
-    return outFrame;
+    return lawrec_annexb_next(frame, size, outsize);
 }
 
 std::list<LiveFrameSource::FramePacket>
@@ -74,8 +61,8 @@ H264LiveFrameSource::parseFrame(std::shared_ptr<uint8_t> data, size_t data_size,
             os << ";sprop-parameter-sets=" << sps_base64 << "," << pps_base64 << ";";
             fAuxLine.assign(os.str());
 
-            free(sps_base64);
-            free(pps_base64);
+            delete[] sps_base64;
+            delete[] pps_base64;
             // std::cout << "H264 SDP-aux-line: " << fAuxLine.c_str() << std::endl;
         }
         FramePacket packet(data, buffer - data.get(), size, ref);

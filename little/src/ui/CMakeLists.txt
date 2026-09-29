@@ -20,6 +20,8 @@ file(GLOB RTSP_SRC
     "${CMAKE_CURRENT_LIST_DIR}/../rtsp/src/*.cpp")
 
 add_executable(${EXE_TARGET}
+    ../common/lawrec_storage.cpp
+    ../common/lawrec_media.cpp
     ${EXE_SRC}
     ${CONTROL_SRC}
     ${RECORD_SRC}

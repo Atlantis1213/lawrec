@@ -10,7 +10,9 @@ option(LAWREC_BUILD_RTSP "Build standalone RTSP helper from buildroot package" O
 option(LAWREC_BUILD_SERVICE "Build service from buildroot package" OFF)
 
 add_subdirectory(ui)
-add_subdirectory(xiaodemo)
+if(DEMO_BUILD)
+    add_subdirectory(xiaodemo)
+endif()
 
 if(LAWREC_BUILD_SERVICE)
     add_subdirectory(service)

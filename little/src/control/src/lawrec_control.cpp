@@ -7,6 +7,7 @@
 #include <mutex>
 
 #include "../../common/lawrec_config.h"
+#include "../../common/lawrec_storage.h"
 #include "../../record/include/lawrec_record_entry.h"
 #include "../../rtsp/include/lawrec_rtsp_entry.h"
 #include "../include/lawrec_control.h"
@@ -113,6 +114,8 @@ static void fill_record_status(lawrec_record_status_t *status)
     status->state = (uint32_t)record_state;
     status->last_error = lawrec_record_get_last_error();
     lawrec_record_copy_last_path(status->file_path, sizeof(status->file_path));
+    lawrec_record_get_progress(&status->elapsed_ms, &status->bytes_written);
+    lawrec_storage_check(&status->free_bytes);
 }
 
 extern "C" int lawrec_control_init(void)
@@ -135,13 +138,13 @@ extern "C" void lawrec_control_deinit(void)
         return;
 
     if (rtsp_state_active(lawrec_rtsp_get_state())) {
-        lawrec_rtsp_stop_wait(3000);
+        lawrec_rtsp_stop_async();
         log_line("control deinit stop rtsp");
     }
     if (lawrec_record_get_state() == LAWREC_RECORD_STATE_STARTING ||
         lawrec_record_get_state() == LAWREC_RECORD_STATE_RECORDING ||
         lawrec_record_get_state() == LAWREC_RECORD_STATE_STOPPING) {
-        lawrec_record_stop_wait(3000);
+        lawrec_record_stop_async();
         log_line("control deinit stop record");
     }
     g_preview_requested = 0;
@@ -173,14 +176,14 @@ extern "C" void lawrec_control_note_preview_request(int enabled)
     if (!enabled) {
         g_preview_active = 0;
         if (rtsp_state_active(lawrec_rtsp_get_state())) {
-            lawrec_rtsp_stop_wait(3000);
+            lawrec_rtsp_stop_async();
             g_rtsp_enabled = 0;
             log_line("preview request disabled, stop rtsp");
         }
         if (lawrec_record_get_state() == LAWREC_RECORD_STATE_STARTING ||
             lawrec_record_get_state() == LAWREC_RECORD_STATE_RECORDING ||
             lawrec_record_get_state() == LAWREC_RECORD_STATE_STOPPING) {
-            lawrec_record_stop_wait(3000);
+            lawrec_record_stop_async();
             g_record_enabled = 0;
             log_line("preview request disabled, stop record");
         }
@@ -203,13 +206,13 @@ extern "C" void lawrec_control_note_preview_result(int enabled)
         g_rtsp_enabled = 0;
         g_record_enabled = 0;
         if (rtsp_state_active(lawrec_rtsp_get_state())) {
-            lawrec_rtsp_stop_wait(3000);
+            lawrec_rtsp_stop_async();
             log_line("preview inactive, stop rtsp");
         }
         if (lawrec_record_get_state() == LAWREC_RECORD_STATE_STARTING ||
             lawrec_record_get_state() == LAWREC_RECORD_STATE_RECORDING ||
             lawrec_record_get_state() == LAWREC_RECORD_STATE_STOPPING) {
-            lawrec_record_stop_wait(3000);
+            lawrec_record_stop_async();
             log_line("preview inactive, stop record");
         }
     }
@@ -279,6 +282,13 @@ extern "C" int lawrec_control_handle_rtsp_cmd(lawrec_service_cmd_e cmd,
 
     switch (cmd) {
     case LAWREC_SERVICE_CMD_RTSP_START:
+        if (lawrec_record_get_state() == LAWREC_RECORD_STATE_STARTING ||
+            lawrec_record_get_state() == LAWREC_RECORD_STATE_RECORDING ||
+            lawrec_record_get_state() == LAWREC_RECORD_STATE_STOPPING) {
+            resp->result = -EBUSY; resp->error_no = EBUSY;
+            snprintf(resp->message, sizeof(resp->message), "record owns encoder");
+            break;
+        }
         /*
          * 当前产品规则：只有预览已经被大核确认启动后，RTSP 才允许开启。
          * 这样可以避免在摄像头链路尚未打开时误起编码/推流流程。
@@ -331,7 +341,7 @@ extern "C" int lawrec_control_handle_rtsp_cmd(lawrec_service_cmd_e cmd,
             break;
         }
 
-        ret = lawrec_rtsp_stop_wait(3000);
+        ret = lawrec_rtsp_stop_async();
         if (ret != 0) {
             resp->result = ret;
             resp->error_no = -ret;
@@ -387,6 +397,11 @@ extern "C" int lawrec_control_handle_record_cmd(lawrec_service_cmd_e cmd,
 
     switch (cmd) {
     case LAWREC_SERVICE_CMD_RECORD_START:
+        if (rtsp_state_active(lawrec_rtsp_get_state())) {
+            resp->result = -EBUSY; resp->error_no = EBUSY;
+            snprintf(resp->message, sizeof(resp->message), "RTSP owns encoder");
+            break;
+        }
         if (!g_preview_active) {
             resp->result = -EAGAIN;
             resp->error_no = EAGAIN;
@@ -418,7 +433,7 @@ extern "C" int lawrec_control_handle_record_cmd(lawrec_service_cmd_e cmd,
         g_record_enabled = 1;
         resp->result = 0;
         snprintf(resp->message, sizeof(resp->message), "%s", "record started");
-        log_line("record start in-process file=%s", lawrec_record_get_last_path());
+        log_line("record start accepted");
         break;
     case LAWREC_SERVICE_CMD_RECORD_STOP:
         if (lawrec_record_get_state() == LAWREC_RECORD_STATE_IDLE ||
@@ -429,7 +444,7 @@ extern "C" int lawrec_control_handle_record_cmd(lawrec_service_cmd_e cmd,
             break;
         }
 
-        ret = lawrec_record_stop_wait(3000);
+        ret = lawrec_record_stop_async();
         if (ret != 0) {
             resp->result = ret;
             resp->error_no = -ret;

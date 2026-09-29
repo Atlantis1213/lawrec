@@ -10,7 +10,7 @@ extern "C" {
 
 #define LAWREC_RTSP_STREAM_NAME_MAX 32
 #define LAWREC_SERVICE_MSG_MAGIC 0x4c535243U
-#define LAWREC_SERVICE_MSG_VERSION 1U
+#define LAWREC_SERVICE_MSG_VERSION 2U
 
 typedef enum {
     LAWREC_SERVICE_MEDIA_STATE_IDLE = 0,
@@ -36,6 +36,9 @@ typedef struct {
     uint32_t state;
     int32_t last_error;
     char file_path[128];
+    uint64_t elapsed_ms;
+    uint64_t bytes_written;
+    uint64_t free_bytes;
 } lawrec_record_status_t;
 
 /* 当前 service 对外统一暴露 RTSP/录像生命周期命令。 */

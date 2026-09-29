@@ -209,7 +209,8 @@ static void scr_main_btn_signup_event_handler(lv_event_t *e)
 static void scr_main_btn_import_event_handler(lv_event_t *e)
 {
     (void)e;
-    scr_main_show_placeholder("录像回放", "kplayer 回放\n待接入");
+    extern void jump_to_scr_files(void);
+    jump_to_scr_files();
 }
 
 static void scr_main_btn_delete_event_handler(lv_event_t *e)

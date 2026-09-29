@@ -269,7 +269,7 @@ static lv_obj_t *scr_preview_create_action_btn(lv_obj_t *parent,
                                                lv_event_cb_t cb)
 {
     lv_obj_t *btn = lv_btn_create(parent);
-    lv_obj_set_size(btn, 188, 94);
+    lv_obj_set_size(btn, 100, 94);
     lv_obj_set_pos(btn, x, 14);
     lv_obj_set_style_radius(btn, 24, LV_PART_MAIN);
     lv_obj_set_style_bg_color(btn, lv_color_hex(0x0c1b28), LV_PART_MAIN);

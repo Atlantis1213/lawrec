@@ -6,7 +6,7 @@
 - SDK dependencies are selected by `K230_SDK_ROOT`.
 - Big core owns camera, display and hardware encoding. Little core owns RTSP
   networking and MP4 file handling. Do not launch demo binaries for business APIs.
-- UI/service ownership refactoring is incomplete. Do not claim board validation
-  based only on successful compilation.
+- V1 uses one Linux business process (UI + control + media). Standalone service
+  is disabled. Do not claim board validation based only on compilation.
 - Preserve the big-core display chain when disabling camera preview output.
 - Keep generated artifacts under `out/` or the SDK Buildroot output directory.

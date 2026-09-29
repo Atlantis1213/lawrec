@@ -1,5 +1,6 @@
 #ifndef _LAWREC_RECORD_ENTRY_H
 #define _LAWREC_RECORD_ENTRY_H
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,6 +31,7 @@ int lawrec_record_get_state(void);
 int lawrec_record_get_last_error(void);
 const char *lawrec_record_get_last_path(void);
 int lawrec_record_copy_last_path(char *buf, unsigned int buf_size);
+void lawrec_record_get_progress(uint64_t *elapsed_ms, uint64_t *bytes);
 
 #ifdef __cplusplus
 }

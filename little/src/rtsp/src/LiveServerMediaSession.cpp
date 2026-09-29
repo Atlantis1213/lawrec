@@ -25,7 +25,8 @@ char const *LiveServerMediaSession::getAuxSDPLine(RTPSink *rtpSink, FramedSource
         os << "a=fmtp:" << (int)rtpSink->rtpPayloadType() << " ";
         os << sdpLine;
         os << "\r\n";
-        auxLine = strdup(os.str().c_str());
+        fSdpLine = os.str();
+        auxLine = fSdpLine.c_str();
 
         // std::cout << auxLine << std::endl;
     }

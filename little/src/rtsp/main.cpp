@@ -19,6 +19,7 @@ struct RtspRuntime {
     lawrec_rtsp_config_t config{};
     lawrec_rtsp_state_e state{LAWREC_RTSP_STATE_IDLE};
     bool stop_requested{false};
+    bool worker_active{false};
     int last_error{0};
 };
 
@@ -70,8 +71,6 @@ void rtsp_worker(lawrec_rtsp_config_t config)
         static_cast<k_i2s_in_mono_channel>(config.audio_input_type);
 
     signal(SIGPIPE, SIG_IGN);
-    setvbuf(stdout, NULL, _IOLBF, 0);
-    setvbuf(stderr, NULL, _IOLBF, 0);
 
     if (config.video_type != nullptr) {
         if (strcmp(config.video_type, "h264") == 0)
@@ -106,8 +105,7 @@ void rtsp_worker(lawrec_rtsp_config_t config)
 
         for (int i = 0; i < session_num; i++) {
             std::string session_name;
-            SessionAttr session_attr;
-            memset(&session_attr, 0, sizeof(session_attr));
+            SessionAttr session_attr{};
             session_attr.session_idx = i;
             session_attr.video_type = video_type;
             session_attr.video_width = video_width;
@@ -132,17 +130,20 @@ void rtsp_worker(lawrec_rtsp_config_t config)
                       << " name=" << session_attr.session_name << std::endl;
         }
 
-        player->Start();
+        ret = player->Start();
+        if (ret != 0) goto fail;
+        auto last_frame = std::chrono::steady_clock::now();
+        unsigned long frames = 0;
         {
             std::lock_guard<std::mutex> guard(g_rtsp.lock);
             if (g_rtsp.stop_requested)
                 rtsp_set_state_locked(LAWREC_RTSP_STATE_STOPPING, 0);
             else
-                rtsp_set_state_locked(LAWREC_RTSP_STATE_LIVE, 0);
+                rtsp_set_state_locked(LAWREC_RTSP_STATE_STARTING, 0);
         }
         rtsp_log_state(lawrec_rtsp_get_state() == LAWREC_RTSP_STATE_STOPPING
                            ? LAWREC_RTSP_STATE_STOPPING
-                           : LAWREC_RTSP_STATE_LIVE,
+                           : LAWREC_RTSP_STATE_STARTING,
                        0);
         std::cout << "[lawrec-rtsp] event loop started" << std::endl;
 
@@ -151,6 +152,23 @@ void rtsp_worker(lawrec_rtsp_config_t config)
                 std::lock_guard<std::mutex> guard(g_rtsp.lock);
                 if (g_rtsp.stop_requested)
                     break;
+            }
+            unsigned long count = player->FrameCount();
+            if (player->Overflowed()) { ret = -EOVERFLOW; goto fail; }
+            auto now = std::chrono::steady_clock::now();
+            if (count != frames) {
+                frames = count;
+                last_frame = now;
+                std::lock_guard<std::mutex> guard(g_rtsp.lock);
+                if (g_rtsp.state == LAWREC_RTSP_STATE_STARTING) {
+                    rtsp_set_state_locked(LAWREC_RTSP_STATE_LIVE, 0);
+                    rtsp_log_state(LAWREC_RTSP_STATE_LIVE, 0);
+                }
+            }
+            if (now - last_frame > std::chrono::seconds(8)) {
+                ret = -ETIMEDOUT;
+                std::cerr << "[lawrec-rtsp] no frame for 8s" << std::endl;
+                goto fail;
             }
             std::this_thread::sleep_for(100ms);
         }
@@ -163,15 +181,16 @@ void rtsp_worker(lawrec_rtsp_config_t config)
         created_sessions = 0;
 
         player->DeInit();
+        ret = player->CleanupError();
         delete player;
         player = nullptr;
 
         {
             std::lock_guard<std::mutex> guard(g_rtsp.lock);
             g_rtsp.stop_requested = false;
-            rtsp_set_state_locked(LAWREC_RTSP_STATE_IDLE, 0);
+            rtsp_set_state_locked(ret ? LAWREC_RTSP_STATE_FAILED : LAWREC_RTSP_STATE_IDLE, ret);
         }
-        rtsp_log_state(LAWREC_RTSP_STATE_IDLE, 0);
+        rtsp_log_state(ret ? LAWREC_RTSP_STATE_FAILED : LAWREC_RTSP_STATE_IDLE, ret);
         std::cout << "[lawrec-rtsp] exit complete" << std::endl;
         return;
     } catch (const std::exception &ex) {
@@ -185,6 +204,7 @@ void rtsp_worker(lawrec_rtsp_config_t config)
 
 fail:
     if (player != nullptr) {
+        player->Stop();
         for (int i = created_sessions - 1; i >= 0; --i)
             player->DestroySession(i);
         player->DeInit();
@@ -213,8 +233,10 @@ extern "C" int lawrec_rtsp_start_async(const lawrec_rtsp_config_t *config)
     lawrec_rtsp_config_t local_config;
     std::thread old_worker;
 
-    if (config == nullptr)
-        return -1;
+    if (config == nullptr || config->session_num != 1 || !config->video_type ||
+        strcmp(config->video_type, "h264") != 0 || config->video_width != 1280 ||
+        config->video_height != 720)
+        return -EINVAL;
 
     {
         std::lock_guard<std::mutex> guard(g_rtsp.lock);
@@ -242,15 +264,22 @@ extern "C" int lawrec_rtsp_start_async(const lawrec_rtsp_config_t *config)
 
     try {
         std::lock_guard<std::mutex> guard(g_rtsp.lock);
-        g_rtsp.worker = std::thread(rtsp_worker, local_config);
+        g_rtsp.worker_active = true;
+        g_rtsp.worker = std::thread([local_config]() {
+            rtsp_worker(local_config);
+            std::lock_guard<std::mutex> lock(g_rtsp.lock);
+            g_rtsp.worker_active = false;
+        });
     } catch (const std::exception &ex) {
         std::lock_guard<std::mutex> guard(g_rtsp.lock);
+        g_rtsp.worker_active = false;
         rtsp_set_state_locked(LAWREC_RTSP_STATE_FAILED, -EAGAIN);
         std::cout << "[lawrec-rtsp] thread create failed: " << ex.what()
                   << std::endl;
         return -EAGAIN;
     } catch (...) {
         std::lock_guard<std::mutex> guard(g_rtsp.lock);
+        g_rtsp.worker_active = false;
         rtsp_set_state_locked(LAWREC_RTSP_STATE_FAILED, -EAGAIN);
         std::cout << "[lawrec-rtsp] thread create failed: unknown"
                   << std::endl;
@@ -300,8 +329,7 @@ extern "C" int lawrec_rtsp_stop_wait(int timeout_ms)
     for (int elapsed = 0; elapsed <= timeout_ms; elapsed += 50) {
         {
             std::lock_guard<std::mutex> guard(g_rtsp.lock);
-            if (g_rtsp.state == LAWREC_RTSP_STATE_IDLE ||
-                g_rtsp.state == LAWREC_RTSP_STATE_FAILED) {
+            if (!g_rtsp.worker_active) {
                 if (g_rtsp.worker.joinable())
                     done_worker = std::move(g_rtsp.worker);
                 break;
@@ -318,8 +346,7 @@ extern "C" int lawrec_rtsp_stop_wait(int timeout_ms)
 
     {
         std::lock_guard<std::mutex> guard(g_rtsp.lock);
-        if (g_rtsp.state != LAWREC_RTSP_STATE_IDLE &&
-            g_rtsp.state != LAWREC_RTSP_STATE_FAILED) {
+        if (g_rtsp.worker_active) {
             std::cout << "[lawrec-rtsp] stop wait timeout state="
                       << rtsp_state_name(g_rtsp.state) << std::endl;
             return -ETIMEDOUT;

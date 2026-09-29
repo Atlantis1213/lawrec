@@ -26,7 +26,12 @@ class LiveFrameSource : public FramedSource {
   public:
     static LiveFrameSource *createNew(UsageEnvironment &env, size_t queue_size);
     void pushData(const uint8_t *data, size_t data_size, uint64_t timestamp);
-    std::string getAuxLine() { return fAuxLine; };
+    std::string getAuxLine() { std::lock_guard<std::mutex> guard(fParseMutex); return fAuxLine; }
+    bool overflowed() const { return fOverflow.load(); }
+    void stopReader() {
+        fNeedReadFrame.store(false);
+        if (fThread.joinable()) fThread.join();
+    }
     virtual EncodeType GetEncodeType() { return EncodeType::INVALID;}
 
   public:
@@ -73,6 +78,9 @@ class LiveFrameSource : public FramedSource {
     std::thread fThread;
     std::mutex fMutex;
     std::mutex fMutexRaw;
+    std::mutex fParseMutex;
+    std::atomic<bool> fOverflow{false};
+    bool fWaitKey{false};
     std::atomic<bool> fNeedReadFrame{true};
     std::string fAuxLine;
 };

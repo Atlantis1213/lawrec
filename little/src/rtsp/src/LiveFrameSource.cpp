@@ -9,14 +9,26 @@ LiveFrameSource* LiveFrameSource::createNew(UsageEnvironment &env, size_t queue_
 LiveFrameSource::LiveFrameSource(UsageEnvironment &env, size_t queue_size) : FramedSource(env), fQueueSize(queue_size) {
     fEventTriggerId = envir().taskScheduler().createEventTrigger(deliverFrame0);
     fThread = std::thread([this](){
+        try {
         while(this->fNeedReadFrame) {
             this->getFrame();
             usleep(1000 * 10); // FIXME
+        }
+        } catch (...) {
+            fOverflow.store(true);
+            fNeedReadFrame.store(false);
         }
     });
 }
 
 void LiveFrameSource::pushData(const uint8_t *data, size_t data_size, uint64_t timestamp) {
+    if (!data || !data_size || data_size > 512 * 1024 || fOverflow.load()) return;
+    std::unique_lock<std::mutex> lck(fMutexRaw);
+    if (fRawDataQueue.size() >= 32) {
+        fOverflow.store(true);
+        std::cerr << "[rtsp] raw queue overflow; session must restart" << std::endl;
+        return;
+    }
     std::shared_ptr<uint8_t> buf = make_shared_array<uint8_t>(data_size);
     memcpy(buf.get(), data, data_size); 
     RawData raw_data;
@@ -24,7 +36,6 @@ void LiveFrameSource::pushData(const uint8_t *data, size_t data_size, uint64_t t
     raw_data.size_ = data_size;
     raw_data.timestamp_ = timestamp;
     
-    std::unique_lock<std::mutex> lck(fMutexRaw);
     fRawDataQueue.push_back(raw_data);
 }
 
@@ -49,10 +60,20 @@ int LiveFrameSource::getFrame() {
 }
 
 void LiveFrameSource::processFrame(std::shared_ptr<uint8_t> data, size_t size, const struct timeval &ref) {
+    std::lock_guard<std::mutex> guard(fParseMutex);
     std::list<FramePacket> packetList = this->parseFrame(data, size, ref);
+    if (fWaitKey && GetEncodeType() == EncodeType::H264) {
+        bool key = false;
+        for (const auto &p : packetList)
+            if (p.size_ && (p.buffer_.get()[p.offset_] & 31) == 5) key = true;
+        if (!key) return;
+        // H264 parser repeats SPS/PPS before each IDR.
+        fWaitKey = false;
+    }
     while (!packetList.empty()) {
         auto packet = packetList.front();
         queueFramePacket(packet);
+        if (fWaitKey) return;
         packetList.pop_front();
     }
 }
@@ -60,7 +81,9 @@ void LiveFrameSource::processFrame(std::shared_ptr<uint8_t> data, size_t size, c
 void LiveFrameSource::queueFramePacket(LiveFrameSource::FramePacket &packet) {
     std::unique_lock<std::mutex> lck(fMutex);
     while (fFramePacketQueue.size() >= fQueueSize) {
-        fFramePacketQueue.pop_front();
+        fFramePacketQueue.clear();
+        fWaitKey = true;
+        return;
     }
     fFramePacketQueue.push_back(packet);
     lck.unlock();
@@ -78,10 +101,7 @@ void LiveFrameSource::doStopGettingFrames() {
 }
 
 LiveFrameSource::~LiveFrameSource() {
-    fNeedReadFrame.store(false);
-    if(fThread.joinable()) {
-        fThread.join();
-    }
+    stopReader();
     while (!fFramePacketQueue.empty()) {
         fFramePacketQueue.pop_front();
     }
@@ -114,6 +134,7 @@ void LiveFrameSource::deliverFrame0(void *clientData) {
 void LiveFrameSource::deliverFrame() {
     if (isCurrentlyAwaitingData()) {
         fDurationInMicroseconds = 0;
+        fNumTruncatedBytes = 0;
         fFrameSize = 0;
 
         FramePacket packet;

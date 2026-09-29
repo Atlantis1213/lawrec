@@ -20,6 +20,7 @@ class LiveServerMediaSession : public OnDemandServerMediaSubsession {
   
   protected:
     StreamReplicator *fReplicator{nullptr};
+    std::string fSdpLine;
 };
 
 #endif // _LIVFRAMESERVERMEDIASUBSESSION_H

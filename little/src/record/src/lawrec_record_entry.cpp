@@ -15,6 +15,8 @@
 #include <unistd.h>
 
 #include "lawrec_record_entry.h"
+#include "../../common/lawrec_storage.h"
+#include "../../common/lawrec_media.h"
 
 extern "C" {
 #include "k_vicap_comm.h"
@@ -45,12 +47,19 @@ struct RecordRuntime {
     lawrec_record_config_t config{};
     lawrec_record_state_e state{LAWREC_RECORD_STATE_IDLE};
     bool stop_requested{false};
+    bool worker_active{false};
+    std::chrono::steady_clock::time_point first_frame_time;
+    uint64_t elapsed_ms{0};
+    uint64_t bytes_written{0};
     int last_error{0};
     std::string last_path;
     std::vector<uint8_t> startup_idr;
     uint64_t startup_pts{0};
+    uint64_t last_pts{0};
     int callback_count{0};
     bool got_first_frame{false};
+    bool have_sps{false};
+    bool have_pps{false};
     KD_HANDLE mp4_muxer{nullptr};
     KD_HANDLE video_track{nullptr};
     bool media_reused{false};
@@ -83,8 +92,11 @@ void reset_runtime_fields_locked()
 {
     g_record.startup_idr.clear();
     g_record.startup_pts = 0;
+    g_record.last_pts = 0;
     g_record.callback_count = 0;
     g_record.got_first_frame = false;
+    g_record.elapsed_ms = g_record.bytes_written = 0;
+    g_record.have_sps = g_record.have_pps = false;
     g_record.mp4_muxer = nullptr;
     g_record.video_track = nullptr;
     g_record.media_reused = false;
@@ -140,7 +152,7 @@ std::string build_record_path(const lawrec_record_config_t &config)
     return std::string(dir) + "/" + prefix + "_" + ts + ".mp4";
 }
 
-int record_video_callback(k_u32 chn_num, kd_venc_data_s *data, k_u8 *private_data)
+int record_video_callback_impl(k_u32 chn_num, kd_venc_data_s *data, k_u8 *private_data)
 {
     k_mp4_frame_data_s frame_data;
     int cut;
@@ -155,152 +167,136 @@ int record_video_callback(k_u32 chn_num, kd_venc_data_s *data, k_u8 *private_dat
         return 0;
 
     cut = static_cast<int>(data->status.cur_packs);
-    if (cut <= 0)
-        return 0;
-
+    if (cut <= 0 || cut > KD_VENC_MAX_FRAME_PACKCOUNT) return -EINVAL;
+    std::vector<uint8_t> frame;
     for (int i = 0; i < cut; ++i) {
-        memset(&frame_data, 0, sizeof(frame_data));
-        frame_data.codec_id = g_record.codec_id;
-        frame_data.data = reinterpret_cast<uint8_t *>(data->astPack[i].vir_addr);
-        frame_data.data_length = data->astPack[i].len;
-        frame_data.time_stamp = data->astPack[i].pts / 1000;
-
-        if (!g_record.got_first_frame) {
-            g_record.startup_idr.insert(g_record.startup_idr.end(),
-                                        frame_data.data,
-                                        frame_data.data + frame_data.data_length);
-            if (g_record.startup_pts == 0)
-                g_record.startup_pts = frame_data.time_stamp;
-        }
+        auto &pack = data->astPack[i];
+        if (!pack.vir_addr || !pack.len || pack.len > 4 * 1024 * 1024 ||
+            frame.size() + pack.len > 4 * 1024 * 1024) return -EINVAL;
+        const auto *p = reinterpret_cast<const uint8_t *>(pack.vir_addr);
+        frame.insert(frame.end(), p, p + pack.len);
     }
-
-    g_record.callback_count += 1;
-    if (!g_record.got_first_frame && g_record.callback_count >= 2 &&
-        !g_record.startup_idr.empty()) {
-        memset(&frame_data, 0, sizeof(frame_data));
-        frame_data.codec_id = g_record.codec_id;
-        frame_data.data = g_record.startup_idr.data();
-        frame_data.data_length = static_cast<uint32_t>(g_record.startup_idr.size());
-        frame_data.time_stamp = g_record.startup_pts;
-        if (kd_mp4_write_frame(g_record.mp4_muxer, g_record.video_track, &frame_data) < 0) {
-            g_record.last_error = -EIO;
-            g_record.stop_requested = true;
-            g_record.state = LAWREC_RECORD_STATE_FAILED;
-            record_log_state("mp4 write startup frame failed", g_record.last_error,
-                             g_record.last_path.c_str());
-            return -EIO;
+    bool key = false;
+    std::vector<uint8_t> headers;
+    for (size_t i = 0; i + 3 < frame.size();) {
+        size_t prefix = 0;
+        if (!frame[i] && !frame[i+1] && frame[i+2] == 1) prefix = 3;
+        else if (!frame[i] && !frame[i+1] && !frame[i+2] && frame[i+3] == 1) prefix = 4;
+        if (!prefix || i + prefix >= frame.size()) { ++i; continue; }
+        size_t end = i + prefix + 1;
+        while (end + 3 < frame.size() &&
+               !(frame[end] == 0 && frame[end+1] == 0 &&
+                 (frame[end+2] == 1 || (frame[end+2] == 0 && frame[end+3] == 1)))) ++end;
+        if (end + 3 >= frame.size()) end = frame.size();
+        int type = frame[i+prefix] & 31;
+        if (type == 7) g_record.have_sps = true;
+        if (type == 8) g_record.have_pps = true;
+        if (type == 5) key = true;
+        if (type == 7 || type == 8) headers.insert(headers.end(), frame.begin()+i, frame.begin()+end);
+        i = end;
+    }
+    if (!g_record.got_first_frame) {
+        if (g_record.startup_idr.size() + headers.size() > 64 * 1024) {
+            g_record.last_error = -EOVERFLOW; g_record.stop_requested = true;
+            return -EOVERFLOW;
         }
-        g_record.got_first_frame = true;
+        g_record.startup_idr.insert(g_record.startup_idr.end(), headers.begin(), headers.end());
+        if (!key || !g_record.have_sps || !g_record.have_pps) return 0;
+        frame.insert(frame.begin(), g_record.startup_idr.begin(), g_record.startup_idr.end());
         g_record.startup_idr.clear();
-        return 0;
+        g_record.startup_pts = data->astPack[0].pts / 1000;
     }
-
-    if (g_record.got_first_frame) {
-        for (int i = 0; i < cut; ++i) {
-            memset(&frame_data, 0, sizeof(frame_data));
-            frame_data.codec_id = g_record.codec_id;
-            frame_data.data = reinterpret_cast<uint8_t *>(data->astPack[i].vir_addr);
-            frame_data.data_length = data->astPack[i].len;
-            frame_data.time_stamp = data->astPack[i].pts / 1000;
-            if (kd_mp4_write_frame(g_record.mp4_muxer, g_record.video_track, &frame_data) < 0) {
-                g_record.last_error = -EIO;
-                g_record.stop_requested = true;
-                g_record.state = LAWREC_RECORD_STATE_FAILED;
-                record_log_state("mp4 write frame failed", g_record.last_error,
-                                 g_record.last_path.c_str());
-                return -EIO;
-            }
-        }
+    memset(&frame_data, 0, sizeof(frame_data));
+    frame_data.codec_id = g_record.codec_id;
+    frame_data.data = frame.data();
+    frame_data.data_length = frame.size();
+    uint64_t pts = data->astPack[0].pts / 1000;
+    if (pts < g_record.startup_pts || (g_record.got_first_frame && pts < g_record.last_pts)) {
+        g_record.last_error = -EINVAL;
+        g_record.stop_requested = true;
+        return -EINVAL;
     }
+    frame_data.time_stamp = pts - g_record.startup_pts;
+    if (kd_mp4_write_frame(g_record.mp4_muxer, g_record.video_track, &frame_data) < 0) {
+        g_record.last_error = -EIO;
+        g_record.stop_requested = true;
+        g_record.state = LAWREC_RECORD_STATE_STOPPING;
+        record_log_state("write failed", -EIO);
+        return -EIO;
+    }
+    if (!g_record.got_first_frame) {
+        g_record.got_first_frame = true;
+        g_record.first_frame_time = std::chrono::steady_clock::now();
+        g_record.state = LAWREC_RECORD_STATE_RECORDING;
+        record_log_state("first IDR written state=recording", 0);
+    }
+    g_record.bytes_written += frame.size();
+    g_record.last_pts = pts;
+    ++g_record.callback_count;
+    g_record.elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - g_record.first_frame_time).count();
     return 0;
+}
+
+int record_video_callback(k_u32 chn_num, kd_venc_data_s *data, k_u8 *private_data)
+{
+    try { return record_video_callback_impl(chn_num, data, private_data); }
+    catch (...) {
+        std::lock_guard<std::mutex> guard(g_record.lock);
+        g_record.last_error = -ENOMEM;
+        g_record.stop_requested = true;
+        g_record.state = LAWREC_RECORD_STATE_STOPPING;
+        return -ENOMEM;
+    }
 }
 
 int init_record_media(const lawrec_record_config_t &config)
 {
-    k_mapi_media_attr_t media_attr;
-    k_u64 pic_size;
-    k_u64 stream_size;
-    int ret = K_FAILED;
-
-    for (int attempt = 1; attempt <= 20; ++attempt) {
-        ret = kd_mapi_sys_init();
-        if (ret == K_SUCCESS) {
-            g_record.sys_initialized = true;
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    }
-    if (ret != K_SUCCESS)
-        return ret;
-
-    memset(&media_attr, 0, sizeof(media_attr));
-    pic_size = static_cast<k_u64>(config.video_width) *
-               static_cast<k_u64>(config.video_height) * 2;
-    stream_size = static_cast<k_u64>(config.video_width) *
-                  static_cast<k_u64>(config.video_height) / 2;
-
-    media_attr.media_config.vb_config.max_pool_cnt = 2;
-    media_attr.media_config.vb_config.comm_pool[0].blk_cnt = 10;
-    media_attr.media_config.vb_config.comm_pool[0].blk_size = ((pic_size + 0xfff) & ~0xfff);
-    media_attr.media_config.vb_config.comm_pool[0].mode = VB_REMAP_MODE_NOCACHE;
-    media_attr.media_config.vb_config.comm_pool[1].blk_cnt = 30;
-    media_attr.media_config.vb_config.comm_pool[1].blk_size = ((stream_size + 0xfff) & ~0xfff);
-    media_attr.media_config.vb_config.comm_pool[1].mode = VB_REMAP_MODE_NOCACHE;
-
-    ret = kd_mapi_media_init(&media_attr);
-    if (ret == kLawrecMapiMediaAlreadyInitialized) {
-        kd_mapi_media_init_workaround(K_TRUE);
-        g_record.media_reused = true;
-        g_record.media_initialized = true;
-        return K_SUCCESS;
-    }
-    g_record.media_reused = false;
-    if (ret != K_SUCCESS) {
-        if (g_record.sys_initialized) {
-            kd_mapi_sys_deinit();
-            g_record.sys_initialized = false;
-        }
-        return ret;
-    }
-    g_record.media_initialized = true;
-    return K_SUCCESS;
+    (void)config;
+    int ret = lawrec_media_acquire(2);
+    if (!ret) g_record.sys_initialized = true;
+    return ret;
 }
 
 void cleanup_record_runtime()
 {
+    { std::lock_guard<std::mutex> guard(g_record.lock); g_record.stop_requested = true; }
     kd_venc_callback_s venc_callback;
+    int cleanup_error = 0;
+    auto check = [&](const char *operation, int ret) {
+        if (ret) { cleanup_error = ret; fprintf(stderr, "[record] %s failed=%d; restart required\n", operation, ret); }
+    };
 
     if (g_record.venc_bound) {
-        kd_mapi_venc_unbind_vi(VICAP_DEV_ID_0, kLawrecRecordVicapChn, kRecordVencChn);
+        check("unbind", kd_mapi_venc_unbind_vi(VICAP_DEV_ID_0, kLawrecRecordVicapChn, kRecordVencChn));
         g_record.venc_bound = false;
     }
     if (g_record.venc_started) {
-        kd_mapi_venc_stop(kRecordVencChn);
+        check("stop", kd_mapi_venc_stop(kRecordVencChn));
         g_record.venc_started = false;
     }
     if (g_record.callback_registered) {
         memset(&venc_callback, 0, sizeof(venc_callback));
-        kd_mapi_venc_unregistercallback(kRecordVencChn, &venc_callback);
+        check("unregister", kd_mapi_venc_unregistercallback(kRecordVencChn, &venc_callback));
         g_record.callback_registered = false;
     }
     if (g_record.venc_initialized) {
-        kd_mapi_venc_deinit(kRecordVencChn);
+        check("deinit", kd_mapi_venc_deinit(kRecordVencChn));
         g_record.venc_initialized = false;
     }
     {
         std::lock_guard<std::mutex> guard(g_record.lock);
+        if (cleanup_error) g_record.last_error = cleanup_error;
         if (g_record.mp4_muxer != nullptr) {
-            kd_mp4_destroy_tracks(g_record.mp4_muxer);
-            kd_mp4_destroy(g_record.mp4_muxer);
+            int tracks_ret = kd_mp4_destroy_tracks(g_record.mp4_muxer);
+            int close_ret = kd_mp4_destroy(g_record.mp4_muxer);
+            if (tracks_ret || close_ret) g_record.last_error = -EIO;
             g_record.mp4_muxer = nullptr;
             g_record.video_track = nullptr;
         }
     }
-    if (g_record.media_initialized && !g_record.media_reused)
-        kd_mapi_media_deinit();
-    g_record.media_initialized = false;
-    if (g_record.sys_initialized)
-        kd_mapi_sys_deinit();
+    if (g_record.sys_initialized && !cleanup_error)
+        lawrec_media_release(2);
     g_record.sys_initialized = false;
 }
 
@@ -311,10 +307,10 @@ void record_worker(lawrec_record_config_t config)
     k_venc_chn_attr chn_attr;
     kd_venc_callback_s venc_callback;
     int ret;
+    auto last_progress = std::chrono::steady_clock::now();
+    int last_count = 0;
 
     signal(SIGPIPE, SIG_IGN);
-    setvbuf(stdout, NULL, _IOLBF, 0);
-    setvbuf(stderr, NULL, _IOLBF, 0);
 
     {
         std::lock_guard<std::mutex> guard(g_record.lock);
@@ -328,7 +324,12 @@ void record_worker(lawrec_record_config_t config)
         reset_runtime_fields_locked();
     }
 
-    ret = mkdirs(config.output_dir != nullptr ? config.output_dir : kDefaultOutputDir);
+    char reserved_path[128];
+    ret = lawrec_storage_reserve(reserved_path, sizeof(reserved_path));
+    if (!ret) {
+        std::lock_guard<std::mutex> guard(g_record.lock);
+        g_record.last_path = reserved_path;
+    }
     if (ret != 0)
         goto fail;
 
@@ -401,15 +402,27 @@ void record_worker(lawrec_record_config_t config)
 
     {
         std::lock_guard<std::mutex> guard(g_record.lock);
-        record_set_state_locked(LAWREC_RECORD_STATE_RECORDING, 0);
+        if (g_record.stop_requested)
+            g_record.state = LAWREC_RECORD_STATE_STOPPING;
     }
-    record_log_state("state=recording", 0, g_record.last_path.c_str());
+    record_log_state("waiting for first IDR", 0, g_record.last_path.c_str());
+    last_progress = std::chrono::steady_clock::now();
 
     while (true) {
         {
             std::lock_guard<std::mutex> guard(g_record.lock);
-            if (g_record.stop_requested)
-                break;
+            if (g_record.stop_requested) break;
+            auto now = std::chrono::steady_clock::now();
+            if (g_record.callback_count != last_count && g_record.got_first_frame) {
+                last_progress = now;
+                last_count = g_record.callback_count;
+            }
+            int storage_ret = lawrec_storage_check(nullptr);
+            if (storage_ret || now - last_progress > std::chrono::seconds(8)) {
+                g_record.last_error = storage_ret ? storage_ret : -ETIMEDOUT;
+                g_record.stop_requested = true;
+                g_record.state = LAWREC_RECORD_STATE_STOPPING;
+            }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -417,6 +430,12 @@ void record_worker(lawrec_record_config_t config)
     cleanup_record_runtime();
     {
         std::lock_guard<std::mutex> guard(g_record.lock);
+        char final_path[128];
+        if (!g_record.last_error && g_record.got_first_frame) {
+            int ret = lawrec_storage_publish(g_record.last_path.c_str(), final_path, sizeof(final_path));
+            if (ret) g_record.last_error = ret;
+            else g_record.last_path = final_path;
+        } else if (!g_record.last_error) g_record.last_error = -ENODATA;
         g_record.stop_requested = false;
         if (g_record.last_error != 0)
             record_set_state_locked(LAWREC_RECORD_STATE_FAILED, g_record.last_error);
@@ -444,7 +463,7 @@ extern "C" int lawrec_record_start_async(const lawrec_record_config_t *config)
     lawrec_record_config_t local_config{};
     std::thread old_worker;
 
-    if (config == nullptr)
+    if (config == nullptr || (config->video_type && strcmp(config->video_type, "h264")))
         return -EINVAL;
 
     {
@@ -482,14 +501,27 @@ extern "C" int lawrec_record_start_async(const lawrec_record_config_t *config)
     record_log_state("state=starting", 0);
     try {
         std::lock_guard<std::mutex> guard(g_record.lock);
-        g_record.worker = std::thread(record_worker, local_config);
+        g_record.worker_active = true;
+        g_record.worker = std::thread([local_config]() {
+            try { record_worker(local_config); }
+            catch (...) {
+                { std::lock_guard<std::mutex> lock(g_record.lock); g_record.stop_requested = true; }
+                cleanup_record_runtime();
+                std::lock_guard<std::mutex> lock(g_record.lock);
+                record_set_state_locked(LAWREC_RECORD_STATE_FAILED, -ENOMEM);
+            }
+            std::lock_guard<std::mutex> lock(g_record.lock);
+            g_record.worker_active = false;
+        });
     } catch (const std::exception &ex) {
         std::lock_guard<std::mutex> guard(g_record.lock);
+        g_record.worker_active = false;
         record_set_state_locked(LAWREC_RECORD_STATE_FAILED, -EAGAIN);
         record_log_state("thread create failed", -EAGAIN, ex.what());
         return -EAGAIN;
     } catch (...) {
         std::lock_guard<std::mutex> guard(g_record.lock);
+        g_record.worker_active = false;
         record_set_state_locked(LAWREC_RECORD_STATE_FAILED, -EAGAIN);
         record_log_state("thread create failed unknown", -EAGAIN);
         return -EAGAIN;
@@ -532,8 +564,7 @@ extern "C" int lawrec_record_stop_wait(int timeout_ms)
     for (int elapsed = 0; elapsed <= timeout_ms; elapsed += 50) {
         {
             std::lock_guard<std::mutex> guard(g_record.lock);
-            if (g_record.state == LAWREC_RECORD_STATE_IDLE ||
-                g_record.state == LAWREC_RECORD_STATE_FAILED) {
+            if (!g_record.worker_active) {
                 if (g_record.worker.joinable())
                     done_worker = std::move(g_record.worker);
                 break;
@@ -550,8 +581,7 @@ extern "C" int lawrec_record_stop_wait(int timeout_ms)
 
     {
         std::lock_guard<std::mutex> guard(g_record.lock);
-        if (g_record.state != LAWREC_RECORD_STATE_IDLE &&
-            g_record.state != LAWREC_RECORD_STATE_FAILED) {
+        if (g_record.worker_active) {
             record_log_state("stop wait timeout", -ETIMEDOUT,
                              g_record.last_path.c_str());
             return -ETIMEDOUT;
@@ -593,4 +623,11 @@ extern "C" int lawrec_record_copy_last_path(char *buf, unsigned int buf_size)
         return -EINVAL;
     std::snprintf(buf, buf_size, "%s", g_record.last_path.c_str());
     return 0;
+}
+
+extern "C" void lawrec_record_get_progress(uint64_t *elapsed_ms, uint64_t *bytes)
+{
+    std::lock_guard<std::mutex> guard(g_record.lock);
+    if (elapsed_ms) *elapsed_ms = g_record.elapsed_ms;
+    if (bytes) *bytes = g_record.bytes_written;
 }

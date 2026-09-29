@@ -54,29 +54,7 @@ typedef struct
     int y2;
 } face_coordinate;
 
-typedef enum
-{
-    MSG_CMD_SIGNUP,
-    MSG_CMD_SIGNUP_RESULT,
-    MSG_CMD_IMPORT,
-    MSG_CMD_IMPORT_RESULT,
-    MSG_CMD_DELETE,
-    MSG_CMD_DELETE_RESULT,
-    MSG_CMD_PREVIEW_ENTER,
-    MSG_CMD_PREVIEW_ENTER_RESULT,
-    MSG_CMD_PREVIEW_EXIT,
-    MSG_CMD_PREVIEW_EXIT_RESULT,
-    MSG_CMD_FEATURE_SAVE,
-    MSG_CMD_ERROR,
-    MSG_CMD_PING,
-    MSG_CMD_PING_RESULT,
-    MSG_CMD_RTSP_START,
-    MSG_CMD_RTSP_START_RESULT,
-    MSG_CMD_RTSP_STOP,
-    MSG_CMD_RTSP_STOP_RESULT,
-    MSG_CMD_RTSP_QUERY,
-    MSG_CMD_RTSP_STATUS,
-}ipc_msg_cmd_t;
+#include "../little/src/common/lawrec_commands.h"
 
 typedef struct
 {

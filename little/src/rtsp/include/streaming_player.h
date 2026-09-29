@@ -63,6 +63,9 @@ public:
                     int video_height, int session_num = 1);
 
     void DeInit() {
+        Stop();
+        for (int i = 0; i < session_num_; ++i)
+            if (venc_initialized_[i]) DestroySession(i);
         if (init_ok_)
             StreamingPlayerDeinit();
         if (rtspServer_ != nullptr) {
@@ -82,7 +85,10 @@ public:
     int CreateSession(const SessionAttr &session_attr);
     int DestroySession(int session_idx);
 
-    void Start();
+    int Start();
+    unsigned long FrameCount() const;
+    bool Overflowed() const;
+    int CleanupError() const { return cleanup_error_; }
 
     void Stop();
     bool Ready() const { return init_ok_; }
@@ -107,12 +113,18 @@ private:
     bool owns_vicap_{true};
     bool server_loop_started_{false};
     bool started_{false};
+    int cleanup_error_{0};
+    bool venc_started_[MAX_SESSION_NUM]{};
+    bool venc_bound_[MAX_SESSION_NUM]{};
+    bool venc_initialized_[MAX_SESSION_NUM]{};
+    bool callback_registered_[MAX_SESSION_NUM]{};
     k_mapi_media_attr_t media_attr_;
     k_vicap_dev_set_info dev_attr_info_;
     k_vicap_sensor_type sensor_type_;
     std::atomic<bool> audio_created_{false};
 
     volatile char watchVariable_{0};
+    EventTriggerId wake_event_{0};
     std::thread server_loop_;
 
     TaskScheduler *scheduler_{nullptr};

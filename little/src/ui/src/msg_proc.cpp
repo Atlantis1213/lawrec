@@ -24,9 +24,12 @@
  */
 
 #include "msg_proc.h"
+#include "../../common/lawrec_preview_wire.h"
 #include "ui_common.h"
 #include <iostream>
 #include <mutex>
+#include <atomic>
+#include <chrono>
 #include <queue>
 #include <thread>
 #include <sched.h>
@@ -54,7 +57,11 @@ typedef struct {
 } msg_mgt_t;
 
 static msg_mgt_t msg_mgt;
-static int ipcmsg_handle = -1;
+static std::atomic<int> ipcmsg_handle{-1};
+static std::atomic<int> ipc_status{0};
+static uint32_t pending_preview = 0;
+static uint32_t preview_sequence = 0;
+static std::chrono::steady_clock::time_point preview_deadline;
 
 static ui_msg_t *ui_msg_alloc(uint32_t size);
 static int ui_msg_put(ui_msg_t *pmsg);
@@ -120,7 +127,7 @@ static void apply_preview_record_state(void)
     }
 }
 
-static int common_msg_proc_helper(ui_cmd_e cmd, int8_t *pdata)
+static int common_msg_proc_helper(ui_cmd_e cmd, int8_t *pdata, uint32_t sequence = 0)
 {
     ui_msg_t *pmsg = ui_msg_alloc(sizeof(ui_msg_t));
     if (pmsg == NULL) {
@@ -129,6 +136,7 @@ static int common_msg_proc_helper(ui_cmd_e cmd, int8_t *pdata)
     }
     pmsg->cmd = cmd;
     pmsg->result = *pdata;
+    memcpy(pmsg->reserve, &sequence, sizeof(sequence));
 
     return ui_msg_put(pmsg);
 }
@@ -271,30 +279,43 @@ static int lawrec_record_handle_local_cmd(uint32_t cmd)
     return resp.result == 0 ? 0 : -1;
 }
 
-static void lawrec_rtsp_handle_local_cmd_async(uint32_t cmd)
+static std::mutex local_cmd_lock;
+static std::queue<uint32_t> local_commands;
+static void enqueue_local_command(uint32_t cmd)
 {
-    /* RTSP 操作放到分离线程里做，避免阻塞 UI 事件路径。 */
-    std::thread([cmd]() {
-        lawrec_rtsp_handle_local_cmd(cmd);
-    }).detach();
+    std::lock_guard<std::mutex> lock(local_cmd_lock);
+    if (local_commands.size() >= 32) {
+        int8_t failed = -1;
+        ui_cmd_e result = cmd == MSG_CMD_RECORD_START ? UI_CMD_RECORD_START_RESULT :
+                          cmd == MSG_CMD_RECORD_STOP ? UI_CMD_RECORD_STOP_RESULT :
+                          cmd == MSG_CMD_RTSP_START ? UI_CMD_RTSP_START_RESULT : UI_CMD_RTSP_STOP_RESULT;
+        common_msg_proc_helper(result, &failed);
+        return;
+    }
+    local_commands.push(cmd);
 }
-
-static void lawrec_record_handle_local_cmd_async(uint32_t cmd)
-{
-    std::thread([cmd]() {
-        lawrec_record_handle_local_cmd(cmd);
-    }).detach();
-}
+static void lawrec_rtsp_handle_local_cmd_async(uint32_t cmd) { enqueue_local_command(cmd); }
+static void lawrec_record_handle_local_cmd_async(uint32_t cmd) { enqueue_local_command(cmd); }
 
 static void* thread_local_rtsp_status(void* arg)
 {
     int last_state = -1;
     int last_preview = -1;
     int last_record = -1;
+    unsigned poll_count = 0;
 
     (void)arg;
 
     while (1) {
+        uint32_t command = UINT32_MAX;
+        {
+            std::lock_guard<std::mutex> lock(local_cmd_lock);
+            if (!local_commands.empty()) { command = local_commands.front(); local_commands.pop(); }
+        }
+        if (command != UINT32_MAX) {
+            if (lawrec_rtsp_handle_local_cmd(command) == 1)
+                lawrec_record_handle_local_cmd(command);
+        }
         /*
          * 轮询本地 preview/RTSP 状态，只在状态变化时向 UI 发消息，
          * 这样既能保持控件同步，也不会无意义地频繁刷新界面。
@@ -304,7 +325,7 @@ static void* thread_local_rtsp_status(void* arg)
         int current_record = lawrec_control_get_record_state();
 
         if (current_state != last_state || current_preview != last_preview ||
-            current_record != last_record) {
+            current_record != last_record || (++poll_count % 5 == 0 && current_record == LAWREC_RECORD_STATE_RECORDING)) {
             lawrec_service_response_t resp;
 
             if (lawrec_control_handle_rtsp_cmd(LAWREC_SERVICE_CMD_RTSP_QUERY,
@@ -332,6 +353,10 @@ static void* thread_local_rtsp_status(void* arg)
 
 static void msg_recv(int handle, k_ipcmsg_message_t* msg)
 {
+    if (!msg || !msg->pBody || msg->u32BodyLen < 1) {
+        printf("IPCMSG: reject empty response\n");
+        return;
+    }
     /* 大核回包在这里转换成 UI 线程可消费的队列消息。 */
     switch (msg->u32CMD) {
     case MSG_CMD_SIGNUP_RESULT:
@@ -344,11 +369,17 @@ static void msg_recv(int handle, k_ipcmsg_message_t* msg)
         common_msg_proc_helper(UI_CMD_DELETE_RESULT, (int8_t *)(msg->pBody));
     break;
     case MSG_CMD_PREVIEW_ENTER_RESULT:
-        common_msg_proc_helper(UI_CMD_PREVIEW_ENTER_RESULT, (int8_t *)(msg->pBody));
-    break;
-    case MSG_CMD_PREVIEW_EXIT_RESULT:
-        common_msg_proc_helper(UI_CMD_PREVIEW_EXIT_RESULT, (int8_t *)(msg->pBody));
-    break;
+    case MSG_CMD_PREVIEW_EXIT_RESULT: {
+        if (msg->u32BodyLen != sizeof(lawrec_preview_wire_t)) break;
+        lawrec_preview_wire_t wire;
+        memcpy(&wire, msg->pBody, sizeof(wire));
+        if (wire.version != LAWREC_PREVIEW_WIRE_VERSION) break;
+        int8_t result = wire.result ? -1 : 0;
+        common_msg_proc_helper(msg->u32CMD == MSG_CMD_PREVIEW_ENTER_RESULT ?
+                              UI_CMD_PREVIEW_ENTER_RESULT : UI_CMD_PREVIEW_EXIT_RESULT,
+                              &result, wire.sequence);
+        break;
+    }
     case MSG_CMD_PING_RESULT:
         common_msg_proc_helper(UI_CMD_PING_RESULT, (int8_t *)(msg->pBody));
     break;
@@ -373,8 +404,10 @@ static void msg_recv(int handle, k_ipcmsg_message_t* msg)
             record_status_msg_proc_helper((const lawrec_record_status_t *)(msg->pBody));
     break;
     case MSG_CMD_FEATURE_SAVE: {
-        uint32_t phyaddr = *((uint32_t *)(msg->pBody));
-        uint32_t length = *(((uint32_t *)(msg->pBody)) + 1);
+        if (msg->u32BodyLen < 8) break;
+        uint32_t phyaddr, length;
+        memcpy(&phyaddr, msg->pBody, 4);
+        memcpy(&length, (char *)msg->pBody + 4, 4);
         feature_db_save(phyaddr, length);
         break;
     }
@@ -403,7 +436,7 @@ static void* thread_ipcmsg(void* arg)
 
         if (retry >= IPCMSG_DEV_WAIT_MAX_RETRY) {
             printf("IPCMSG: /dev/ipcm_user not ready, retry later\n");
-            scr_main_set_status("IPC pending", lv_color_hex(0xffd166));
+            ipc_status.store(0);
             sleep(1);
             continue;
         }
@@ -411,14 +444,14 @@ static void* thread_ipcmsg(void* arg)
         printf("IPCMSG: connecting %s\n", LAWREC_IPC_SERVICE_NAME);
         if (kd_ipcmsg_connect(&handle, LAWREC_IPC_SERVICE_NAME, msg_recv)) {
             printf("IPCMSG: connect failed, retry later\n");
-            scr_main_set_status("IPC connect fail", lv_color_hex(0xff6b6b));
+            ipc_status.store(-1);
             usleep(IPCMSG_CONNECT_RETRY_US);
             continue;
         }
 
         printf("IPCMSG: connected\n");
         ipcmsg_handle = handle;
-        scr_main_set_status("IPC connected", lv_color_hex(0xffd166));
+        ipc_status.store(1);
 
         {
             char tmp = 0;
@@ -439,7 +472,7 @@ static void* thread_ipcmsg(void* arg)
             printf("IPCMSG: disconnect failed: %d\n", ret);
         ipcmsg_handle = -1;
         printf("IPCMSG: disconnected, retry later\n");
-        scr_main_set_status("IPC disconnected", lv_color_hex(0xff6b6b));
+        ipc_status.store(-1);
         usleep(IPCMSG_CONNECT_RETRY_US);
     }
 
@@ -457,7 +490,7 @@ static int msg_send_data(uint32_t cmd, void *payload, uint32_t payload_len)
     else if (cmd == MSG_CMD_PREVIEW_EXIT)
         lawrec_control_note_preview_request(0);
 
-    printf("LAWREC-UI: send cmd=%u ipc=%d\n", cmd, ipcmsg_handle);
+    printf("LAWREC-UI: send cmd=%u ipc=%d\n", cmd, ipcmsg_handle.load());
 
     if (cmd == MSG_CMD_RTSP_START || cmd == MSG_CMD_RTSP_STOP ||
         cmd == MSG_CMD_RTSP_QUERY) {
@@ -493,10 +526,10 @@ static int msg_send_data(uint32_t cmd, void *payload, uint32_t payload_len)
         printf("LAWREC-UI: create message failed cmd=%u\n", cmd);
         return -1;
     }
-    kd_ipcmsg_send_only(ipcmsg_handle, pReq);
+    int ret = kd_ipcmsg_send_only(ipcmsg_handle.load(), pReq);
     kd_ipcmsg_destroy_message(pReq);
-
-    return 0;
+    if (ret) printf("IPCMSG: send failed cmd=%u ret=%d\n", cmd, ret);
+    return ret;
 }
 
 
@@ -504,7 +537,7 @@ static ui_msg_t *ui_msg_alloc(uint32_t size)
 {
     ui_msg_t *msg;
 
-    msg = (ui_msg_t *)malloc(sizeof(ui_msg_t) + size);
+    msg = (ui_msg_t *)calloc(1, size);
 
     return msg;
 }
@@ -588,7 +621,11 @@ int msg_proc_init(void)
     stConnectAttr.u32RemoteId = 1;
     stConnectAttr.u32Port = 101;
     stConnectAttr.u32Priority = 0;
-    kd_ipcmsg_add_service(LAWREC_IPC_SERVICE_NAME, &stConnectAttr);
+    ret = kd_ipcmsg_add_service(LAWREC_IPC_SERVICE_NAME, &stConnectAttr);
+    if (ret != 0) {
+        printf("IPCMSG: add service failed=%d\n", ret);
+        return -1;
+    }
 
     pthread_attr_init(&tattr_thread_ipcmsg);
     max_prio = sched_get_priority_max(SCHED_RR);
@@ -640,7 +677,21 @@ int msg_proc_init(void)
 int msg_send_cmd(uint32_t cmd)
 {
     char tmp = 0;
-    return msg_send_data(cmd, &tmp, 1);
+    bool preview = cmd == MSG_CMD_PREVIEW_ENTER || cmd == MSG_CMD_PREVIEW_EXIT;
+    if (preview && pending_preview) return -1;
+    lawrec_preview_wire_t wire{LAWREC_PREVIEW_WIRE_VERSION, preview ? ++preview_sequence : 0, 0};
+    int ret = preview ? msg_send_data(cmd, &wire, sizeof(wire)) : msg_send_data(cmd, &tmp, 1);
+    if (preview) {
+        if (!ret) {
+            pending_preview = cmd;
+            preview_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        } else {
+            pending_preview = cmd;
+            int8_t error = -1;
+            common_msg_proc_helper(cmd == MSG_CMD_PREVIEW_ENTER ? UI_CMD_PREVIEW_ENTER_RESULT : UI_CMD_PREVIEW_EXIT_RESULT, &error, preview_sequence);
+        }
+    }
+    return ret;
 }
 
 int msg_send_cmd_with_data(uint32_t cmd, void *payload, uint32_t payload_len)
@@ -653,6 +704,24 @@ int ui_msg_proc(void)
     int ret;
     ui_msg_t *pmsg;
 
+    static int last_ipc_status = 0;
+    int current_ipc_status = ipc_status.load();
+    if (current_ipc_status != last_ipc_status) {
+        last_ipc_status = current_ipc_status;
+        scr_main_set_status(current_ipc_status == 1 ? "IPC connected" : "IPC offline",
+                            lv_color_hex(current_ipc_status == 1 ? 0x4ade80 : 0xff6b6b));
+        if (current_ipc_status != 1) {
+            lawrec_control_note_preview_result(0);
+            apply_preview_rtsp_state();
+            apply_preview_record_state();
+        }
+    }
+    if (pending_preview && std::chrono::steady_clock::now() >= preview_deadline) {
+        int8_t error = -1;
+        printf("IPCMSG: preview timeout cmd=%u\n", pending_preview);
+        common_msg_proc_helper(pending_preview == MSG_CMD_PREVIEW_ENTER ? UI_CMD_PREVIEW_ENTER_RESULT : UI_CMD_PREVIEW_EXIT_RESULT, &error, preview_sequence);
+        preview_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    }
     ret = ui_msg_get(&pmsg);
     if (ret != 0)
         return ret;
@@ -661,6 +730,16 @@ int ui_msg_proc(void)
      * All asynchronous results, whether they came from big-core IPC or local
      * RTSP control, are serialized through this single UI-thread consumer.
      */
+    if (pmsg->cmd == UI_CMD_PREVIEW_ENTER_RESULT || pmsg->cmd == UI_CMD_PREVIEW_EXIT_RESULT) {
+        uint32_t seq;
+        memcpy(&seq, pmsg->reserve, sizeof(seq));
+        bool expected = (pending_preview == MSG_CMD_PREVIEW_ENTER && pmsg->cmd == UI_CMD_PREVIEW_ENTER_RESULT) ||
+                        (pending_preview == MSG_CMD_PREVIEW_EXIT && pmsg->cmd == UI_CMD_PREVIEW_EXIT_RESULT);
+        if (!expected || seq != preview_sequence) {
+            printf("IPCMSG: ignore stale preview seq=%u\n", seq);
+            ui_msg_free(pmsg); return 0;
+        }
+    }
     switch (pmsg->cmd) {
     case UI_CMD_SIGNUP_RESULT:
     case UI_CMD_IMPORT_RESULT:
@@ -668,6 +747,7 @@ int ui_msg_proc(void)
         scr_main_display_result(pmsg->result);
     break;
     case UI_CMD_PREVIEW_ENTER_RESULT:
+        pending_preview = 0;
         lawrec_control_note_preview_result(pmsg->result == 0 ? 1 : 0);
         apply_preview_rtsp_state();
         apply_preview_record_state();
@@ -676,6 +756,7 @@ int ui_msg_proc(void)
                                                  : lv_color_hex(0xff6b6b));
     break;
     case UI_CMD_PREVIEW_EXIT_RESULT:
+        pending_preview = 0;
         lawrec_control_note_preview_result(0);
         apply_preview_rtsp_state();
         apply_preview_record_state();
@@ -684,7 +765,8 @@ int ui_msg_proc(void)
                                               : lv_color_hex(0xff6b6b));
         if (scr_preview_is_back_pending()) {
             scr_preview_clear_back_pending();
-            jump_to_scr_main();
+            if (pmsg->result == 0) jump_to_scr_main();
+            else scr_preview_set_status("预览关闭失败", lv_color_hex(0xff6b6b));
         }
     break;
     case UI_CMD_PING_RESULT:
@@ -786,9 +868,10 @@ int ui_msg_proc(void)
             else if (record_state == LAWREC_RECORD_STATE_FAILED)
                 record_state_text = "failed";
 
-            snprintf(status_text, sizeof(status_text), "REC %s %s",
-                     record_state_text,
-                     status->file_path[0] ? status->file_path : "");
+            snprintf(status_text, sizeof(status_text), "REC %s %llus %.1fMiB free %.0fMiB err=%d",
+                     record_state_text, (unsigned long long)(status->elapsed_ms / 1000),
+                     status->bytes_written / 1048576.0, status->free_bytes / 1048576.0,
+                     status->last_error);
             apply_preview_record_state();
             scr_main_set_status(status_text,
                                 record_state == LAWREC_RECORD_STATE_RECORDING
