@@ -39,6 +39,7 @@
 #include "../../rtsp/include/lawrec_rtsp_entry.h"
 #include "../../playback/lawrec_playback.h"
 #include "lawrec_network.h"
+#include "lawrec_settings.h"
 
 static volatile sig_atomic_t stop_requested;
 static void stop_signal(int signo) { (void)signo; stop_requested = 1; }
@@ -91,6 +92,8 @@ int main(void)
     signal(SIGPIPE, SIG_IGN);
     set_mallopt();
     setup_log_streams();
+    /* Freeze media settings at process startup, not at the first recording. */
+    (void)lawrec_settings_port();
     fprintf(stderr, "lawrec ui build: media-settings-dev single-process " __DATE__ " " __TIME__ "\n");
 
     /*

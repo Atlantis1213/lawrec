@@ -50,9 +50,10 @@ int LiveFrameSource::getFrame() {
 
     int frameSize = 0;
     if (raw_data.buffer_ && raw_data.size_) {
-        // use system-time when getFrame() called as PresentationTime
-        struct timeval ref;
-        gettimeofday(&ref, NULL);
+        // Producer already mapped SDK PTS onto the shared RTSP wall clock.
+        struct timeval ref{};
+        ref.tv_sec = raw_data.timestamp_ / 1000000;
+        ref.tv_usec = raw_data.timestamp_ % 1000000;
         frameSize = raw_data.size_;
         processFrame(raw_data.buffer_, frameSize, ref);
     }

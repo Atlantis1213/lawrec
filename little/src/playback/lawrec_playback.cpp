@@ -16,6 +16,8 @@ extern "C" {
 #include "mp4_format.h"
 #include "mapi_sys_api.h"
 #include "mapi_vdec_api.h"
+#include "mapi_adec_api.h"
+#include "mapi_ao_api.h"
 }
 
 namespace {
@@ -44,6 +46,10 @@ void run(int file)
     int error = 0, input_pool = -1, output_pool = -1, mem = -1;
     bool leased = false, initialized = false, started = false, bound = false;
     bool display_requested = false, cleanup_ok = true, completed = false;
+    bool audio_present = false, ao_initialized = false, ao_started = false;
+    bool adec_initialized = false, adec_started = false, audio_bound = false;
+    k_handle ao = 0;
+    k_mp4_codec_id_e audio_codec = K_MP4_CODEC_ID_G711A;
     uint64_t physical = 0;
     void *mapping = MAP_FAILED;
     size_t map_size = 0;
@@ -60,13 +66,24 @@ void run(int file)
         k_mp4_file_info_s info{};
         if ((error = check(kd_mp4_get_file_info(demux, &info), "file info"))) break;
         // The SDK frame API does not identify track IDs. Reject ambiguous files.
-        if (info.track_num != 1) { error = -ENOTSUP; break; }
-        k_mp4_track_info_s track{};
-        if ((error = check(kd_mp4_get_track_by_index(demux, 0, &track), "track info"))) break;
-        if (track.track_type != K_MP4_STREAM_VIDEO || track.video_info.codec_id != K_MP4_CODEC_ID_H264 ||
-            track.video_info.width != 1280 || track.video_info.height != 720) {
-            error = -ENOTSUP; break;
+        if (!info.track_num || info.track_num > 2) { error = -ENOTSUP; break; }
+        bool video_present = false;
+        for (unsigned i = 0; i < info.track_num; ++i) {
+            k_mp4_track_info_s track{};
+            if ((error = check(kd_mp4_get_track_by_index(demux, i, &track), "track info"))) break;
+            if (track.track_type == K_MP4_STREAM_VIDEO && !video_present &&
+                track.video_info.codec_id == K_MP4_CODEC_ID_H264 &&
+                track.video_info.width == 1280 && track.video_info.height == 720) video_present = true;
+            else if (track.track_type == K_MP4_STREAM_AUDIO && !audio_present &&
+                     (track.audio_info.codec_id == K_MP4_CODEC_ID_G711A ||
+                      track.audio_info.codec_id == K_MP4_CODEC_ID_G711U) &&
+                     track.audio_info.channels == 1 && track.audio_info.sample_rate == 8000) {
+                audio_present = true;
+                audio_codec = track.audio_info.codec_id;
+            } else { error = -ENOTSUP; break; }
         }
+        if (error) break;
+        if (!video_present) { error = -ENOTSUP; break; }
         { std::lock_guard<std::mutex> guard(mutex); status.duration_ms = info.duration; }
         if (stop) break;
         if ((error = check(lawrec_media_acquire(kOwner), "media acquire"))) break;
@@ -93,9 +110,35 @@ void run(int file)
         started = true;
         if ((error = check(kd_mapi_vdec_bind_vo(0, 0, 0), "vdec bind"))) break;
         bound = true;
+        if (audio_present) {
+            k_aio_dev_attr audio{};
+            audio.audio_type = KD_AUDIO_OUTPUT_TYPE_I2S;
+            auto &i2s = audio.kd_audio_attr.i2s_attr;
+            i2s.sample_rate = 8000; i2s.bit_width = KD_AUDIO_BIT_WIDTH_16;
+            i2s.chn_cnt = 2; i2s.snd_mode = KD_AUDIO_SOUND_MODE_MONO;
+            i2s.i2s_mode = K_STANDARD_MODE; i2s.i2s_type = K_AIO_I2STYPE_INNERCODEC;
+            i2s.frame_num = 25; i2s.point_num_per_frame = 320;
+            if ((error = check(kd_mapi_ao_init(0, 0, &audio, &ao), "ao init"))) break;
+            ao_initialized = true;
+            if ((error = check(kd_mapi_ao_start(ao), "ao start"))) break;
+            ao_started = true;
+            k_adec_chn_attr decoder{};
+            decoder.type = audio_codec == K_MP4_CODEC_ID_G711A ? K_PT_G711A : K_PT_G711U;
+            decoder.buf_size = 25; decoder.point_num_per_frame = 320;
+            decoder.mode = K_ADEC_MODE_PACK;
+            if ((error = check(kd_mapi_adec_init(0, &decoder), "adec init"))) break;
+            adec_initialized = true;
+            if ((error = check(kd_mapi_adec_start(0), "adec start"))) break;
+            adec_started = true;
+            if ((error = check(kd_mapi_adec_bind_ao(ao, 0), "adec bind"))) break;
+            audio_bound = true;
+        }
         mem = open("/dev/mem", O_RDWR | O_SYNC | O_CLOEXEC);
         if (mem < 0) { error = -errno; break; }
-        uint64_t first_pts = 0, last_pts = 0;
+        uint64_t first_pts = 0, last_pts[2]{};
+        bool seen[2]{};
+        uint32_t audio_sequence = 0;
+        auto audio_until = Clock::now();
         bool first = true, announced = false;
         uint32_t decoded_count = 0;
         auto last_decoded = Clock::now();
@@ -121,13 +164,23 @@ void run(int file)
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
                 if (!stop && !completed && !error) error = -ETIMEDOUT;
+                // ADEC has no EOS query API; allow the final submitted sample
+                // duration to elapse before stopping AO (not a hardware drain ACK).
+                while (!stop && !error && Clock::now() < audio_until)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 break;
             }
+            bool is_audio = audio_present && frame.codec_id == audio_codec;
             if (!frame.data || !frame.data_length || frame.data_length > kStreamBytes ||
-                frame.codec_id != K_MP4_CODEC_ID_H264) { error = -EBADMSG; break; }
-            if (first) { first_pts = frame.time_stamp; last_pts = first_pts; origin = Clock::now(); first = false; }
-            if (frame.time_stamp < last_pts || frame.time_stamp - last_pts > 10000) { error = -EBADMSG; break; }
-            last_pts = frame.time_stamp;
+                (!is_audio && frame.codec_id != K_MP4_CODEC_ID_H264) ||
+                (is_audio && frame.data_length > 320)) { error = -EBADMSG; break; }
+            if (first) { first_pts = frame.time_stamp; origin = Clock::now(); first = false; }
+            unsigned track_index = is_audio ? 1 : 0;
+            if (frame.time_stamp < first_pts ||
+                (seen[track_index] && (frame.time_stamp < last_pts[track_index] ||
+                 frame.time_stamp-last_pts[track_index] > 10000))) { error = -EBADMSG; break; }
+            seen[track_index] = true;
+            last_pts[track_index] = frame.time_stamp;
             auto due = origin + std::chrono::milliseconds(frame.time_stamp - first_pts);
             while (!stop && (paused || Clock::now() < due)) {
                 auto before = Clock::now();
@@ -149,7 +202,14 @@ void run(int file)
             stream.pts = (frame.time_stamp - first_pts) * 1000;
             // SDK currently ignores this timeout. If it stalls, stop_wait reports
             // timeout and resources remain owned; never free a block in flight.
-            error = check(kd_mapi_vdec_send_stream(0, &stream, 1000), "send stream");
+            if (is_audio) {
+                k_audio_stream audio{};
+                audio.stream = reinterpret_cast<k_u8 *>(static_cast<char *>(mapping) + offset);
+                audio.phys_addr = physical; audio.len = frame.data_length;
+                audio.time_stamp = stream.pts; audio.seq = audio_sequence++;
+                error = check(kd_mapi_adec_send_stream(0, &audio), "send audio");
+                audio_until = Clock::now() + std::chrono::microseconds(frame.data_length * 125);
+            } else error = check(kd_mapi_vdec_send_stream(0, &stream, 1000), "send stream");
             if (error) break; // Keep the input block until decoder teardown.
             munmap(mapping, map_size); mapping = MAP_FAILED;
             int released = check(kd_mapi_sys_release_vb_block(physical, kStreamBytes), "release input");
@@ -169,10 +229,15 @@ void run(int file)
                 error = -ETIMEDOUT; break;
             }
             { std::lock_guard<std::mutex> guard(mutex);
-              status.position_ms = frame.time_stamp - first_pts; ++status.frames; }
+              status.position_ms = frame.time_stamp - first_pts; if (!is_audio) ++status.frames; }
         }
     } while (false);
     // One worker owns both feed and teardown; UI never frees decoder resources.
+    if (audio_bound && check(kd_mapi_adec_unbind_ao(ao, 0), "audio unbind")) cleanup_ok = false;
+    if (adec_started && check(kd_mapi_adec_stop(0), "adec stop")) cleanup_ok = false;
+    if (adec_initialized && check(kd_mapi_adec_deinit(0), "adec deinit")) cleanup_ok = false;
+    if (ao_started && check(kd_mapi_ao_stop(ao), "ao stop")) cleanup_ok = false;
+    if (ao_initialized && check(kd_mapi_ao_deinit(ao), "ao deinit")) cleanup_ok = false;
     if (bound && check(kd_mapi_vdec_unbind_vo(0, 0, 0), "unbind")) cleanup_ok = false;
     if (started && check(kd_mapi_vdec_stop(0), "stop")) cleanup_ok = false;
     if (initialized && check(kd_mapi_vdec_deinit(0), "deinit")) cleanup_ok = false;

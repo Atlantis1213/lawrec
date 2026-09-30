@@ -8,6 +8,7 @@
 #include <memory>
 #include <atomic>
 #include <thread>
+#include "lawrec_frame_queue.h"
 #include "liveMedia.hh"
 #include "BasicUsageEnvironment.hh"
 #include "GroupsockHelper.hh"
@@ -65,7 +66,7 @@ public:
     void DeInit() {
         Stop();
         for (int i = 0; i < session_num_; ++i)
-            if (venc_initialized_[i]) DestroySession(i);
+            if (session_created_[i] || (i == 0 && audio_created_)) DestroySession(i);
         if (init_ok_)
             StreamingPlayerDeinit();
         if (rtspServer_ != nullptr) {
@@ -95,7 +96,6 @@ public:
     int InitResult() const { return init_ret_; }
 
 private:
-    int CreateAudioEncode(const SessionAttr &session_attr);
     int CreateVideoEncode(const SessionAttr &session_attr);
     int StreamingPlayerInit();
     int StreamingPlayerDeinit();
@@ -114,10 +114,13 @@ private:
     bool server_loop_started_{false};
     bool started_{false};
     int cleanup_error_{0};
-    bool venc_started_[MAX_SESSION_NUM]{};
-    bool venc_bound_[MAX_SESSION_NUM]{};
-    bool venc_initialized_[MAX_SESSION_NUM]{};
-    bool callback_registered_[MAX_SESSION_NUM]{};
+    bool session_created_[MAX_SESSION_NUM]{};
+    LawrecFrameQueue video_queue_{64, 8 * 1024 * 1024};
+    std::thread video_worker_;
+    std::atomic<int> video_error_{0};
+    LawrecFrameQueue audio_queue_{64, 128 * 1024};
+    std::thread audio_worker_;
+    std::atomic<int> audio_error_{0};
     k_mapi_media_attr_t media_attr_;
     k_vicap_dev_set_info dev_attr_info_;
     k_vicap_sensor_type sensor_type_;

@@ -21,11 +21,14 @@ file(GLOB RTSP_SRC
 
 add_executable(${EXE_TARGET}
     ../common/lawrec_settings.cpp
+    ../common/lawrec_time.cpp
     ../common/lawrec_network.cpp
     ../common/lawrec_process.cpp
     ../common/lawrec_wifi_transaction.cpp
     ../common/lawrec_storage.cpp
     ../common/lawrec_media.cpp
+    ../common/lawrec_encoder.cpp
+    ../common/lawrec_audio.cpp
     ../playback/lawrec_playback.cpp
     ${EXE_SRC}
     ${CONTROL_SRC}

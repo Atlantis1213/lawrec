@@ -7,25 +7,32 @@ extern "C" {
 void kd_mapi_media_init_workaround(k_bool);
 }
 static std::mutex lock;
-static int current_owner;
+static unsigned owners;
+static bool client_initialized;
 int lawrec_media_acquire(int owner)
 {
     std::lock_guard<std::mutex> guard(lock);
-    if (current_owner) return -EBUSY;
-    int ret = kd_mapi_sys_init();
-    if (ret) return ret;
+    if (owner < 1 || owner > 3) return -EINVAL;
+    unsigned bit = 1u << owner;
+    // RTSP and recording share VENC; playback exclusively owns decoder/VO.
+    if ((owners & bit) || (owners && owner == 3) || (owners & (1u << 3))) return -EBUSY;
+    if (!client_initialized) {
+        int ret = kd_mapi_sys_init();
+        if (ret) return ret;
+        client_initialized = true;
+    }
     // Preview ACK establishes big-core VB readiness. Only set the SDK client
     // flag; the application never acquires ownership of the remote VB pools.
     kd_mapi_media_init_workaround(K_TRUE);
-    current_owner = owner;
-    fprintf(stderr, "[media] acquired owner=%d\n", owner);
+    owners |= bit;
+    fprintf(stderr, "[media] acquired owner=%d mask=%u\n", owner, owners);
     return 0;
 }
 void lawrec_media_release(int owner)
 {
     std::lock_guard<std::mutex> guard(lock);
-    if (current_owner != owner) return;
+    if (owner < 1 || owner > 3) return;
     // Retain the SDK client connection for process lifetime.
-    current_owner = 0;
-    fprintf(stderr, "[media] released owner=%d\n", owner);
+    owners &= ~(1u << owner);
+    fprintf(stderr, "[media] released owner=%d mask=%u\n", owner, owners);
 }

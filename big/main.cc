@@ -954,6 +954,15 @@ int sample_vb_init(void)
     config.comm_pool[3].mode = VB_REMAP_MODE_NOCACHE;
     config.comm_pool[3].blk_size = rtsp_venc_stream_size;
 
+    // Dedicated small blocks keep audio from consuming camera/VENC buffers.
+    // 8 kHz, 40 ms frames; reserve capture and future playback separately.
+    config.comm_pool[4].blk_cnt = 50;
+    config.comm_pool[4].mode = VB_REMAP_MODE_NOCACHE;
+    config.comm_pool[4].blk_size = 8000 * 2 * 4 / 25;
+    config.comm_pool[5].blk_cnt = 25;
+    config.comm_pool[5].mode = VB_REMAP_MODE_NOCACHE;
+    config.comm_pool[5].blk_size = 8000 * 2 * 4 / 25 * 2;
+
     ret = kd_mpi_vb_set_config(&config);
     if (ret) {
         printf("vb_set_config failed ret:%d\n", ret);

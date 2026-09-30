@@ -12,8 +12,10 @@ int main(int argc, char **argv)
 {
     assert(argc >= 2);
     setenv("LAWREC_SETTINGS_DIR", argv[1], 1);
-    if (argc == 3) {
+    if (argc == 5) {
         assert(lawrec_settings_port() == atoi(argv[2]));
+        assert(lawrec_settings_bitrate() == atoi(argv[3]));
+        assert(lawrec_settings_segment_seconds() == atoi(argv[4]));
         return 0;
     }
     assert(mkdir(argv[1], 0700) == 0);
@@ -22,22 +24,69 @@ int main(int argc, char **argv)
     assert(lawrec_settings_save_port(65536) == -EINVAL);
     assert(lawrec_settings_save_port(9554) == 0);
     assert(lawrec_settings_port() == 8554);
-    auto check_child = [&](const char *expected) {
+    auto check_child = [&](const char *expected, const char *bitrate = "4000", const char *segment = "0") {
         pid_t pid = fork();
         assert(pid >= 0);
-        if (!pid) { execl(argv[0], argv[0], argv[1], expected, (char *)nullptr); _exit(127); }
+        if (!pid) { execl(argv[0], argv[0], argv[1], expected, bitrate, segment, (char *)nullptr); _exit(127); }
         int status;
         assert(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     };
     check_child("9554");
+    lawrec_media_settings pending;
+    assert(lawrec_settings_media_pending(&pending) == 0);
+    assert(pending.version == 1 && pending.rtsp_port == 9554 && pending.video_bitrate_kbps == 4000);
+    pending.rtsp_port = 10554; pending.video_bitrate_kbps = 6000;
+    pending.record_segment_seconds = 60;
+    pending.audio_enabled = 1;
+    assert(lawrec_settings_media_save(&pending) == 0);
+    check_child("10554", "6000", "60");
+    assert(lawrec_settings_port() == 8554 && lawrec_settings_bitrate() == 4000);
+    assert(lawrec_settings_save_port(9554) == 0);
+    assert(lawrec_settings_media_pending(&pending) == 0 && pending.audio_enabled == 1);
+    assert(lawrec_settings_audio_enabled() == 0);
+    pending.audio_enabled = 2;
+    assert(lawrec_settings_media_save(&pending) == -EINVAL);
+    pending.audio_enabled = 1;
+    check_child("9554", "6000", "60");
+    pending.version = 2;
+    assert(lawrec_settings_media_save(&pending) == -EINVAL);
+    pending.version = 1; pending.video_bitrate_kbps = 999;
+    assert(lawrec_settings_media_save(&pending) == -EINVAL);
+    pending.video_bitrate_kbps = 8001;
+    assert(lawrec_settings_media_save(&pending) == -EINVAL);
+    assert(lawrec_settings_media_save(nullptr) == -EINVAL);
+    pending.video_bitrate_kbps = 4000; pending.record_segment_seconds = 59;
+    assert(lawrec_settings_media_save(&pending) == -EINVAL);
+    pending.record_segment_seconds = 3601;
+    assert(lawrec_settings_media_save(&pending) == -EINVAL);
+    check_child("9554", "6000", "60");
     char path[1024];
-    snprintf(path, sizeof(path), "%s/lawrec-rtsp-port", argv[1]);
+    snprintf(path, sizeof(path), "%s/lawrec-media.conf", argv[1]);
     FILE *fp = fopen(path, "w"); assert(fp);
     fputs("9554garbage\n", fp); fclose(fp);
     check_child("8554");
+    assert(lawrec_settings_media_pending(&pending) == -EINVAL);
+    assert(pending.rtsp_port == 8554 && pending.video_bitrate_kbps == 4000);
+    assert(lawrec_settings_save_port(9555) == -EINVAL);
+    const char *invalid[] = {
+        "version=2\nrtsp_port=9554\nvideo_bitrate_kbps=4000\n",
+        "version=1\nrtsp_port=9554\nvideo_bitrate_kbps=4000\nrtsp_port=9666\n",
+        "version=1\nrtsp_port=9554\n",
+        "version=1\nrtsp_port=9554\nvideo_bitrate_kbps=4000\nunknown=1\n",
+        "version=1\nrtsp_port=99999999999999999999999\nvideo_bitrate_kbps=4000\n",
+    };
+    for (const char *text : invalid) {
+        fp = fopen(path, "w"); assert(fp); fputs(text, fp); fclose(fp);
+        assert(lawrec_settings_media_pending(&pending) == -EINVAL);
+        check_child("8554");
+    }
     unlink(path);
     assert(symlink("/dev/zero", path) == 0);
     check_child("8554");
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/lawrec-rtsp-port", argv[1]);
+    fp = fopen(path, "w"); assert(fp); fputs("9666\n", fp); fclose(fp);
+    check_child("9666");
     unlink(path);
     char addresses[4096];
     assert(lawrec_settings_save_wifi("hotspot", "valid123") == 0);

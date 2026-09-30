@@ -290,13 +290,6 @@ extern "C" int lawrec_control_handle_rtsp_cmd(lawrec_service_cmd_e cmd,
             snprintf(resp->message, sizeof(resp->message), "playback owns media");
             break;
         }
-        if (lawrec_record_get_state() == LAWREC_RECORD_STATE_STARTING ||
-            lawrec_record_get_state() == LAWREC_RECORD_STATE_RECORDING ||
-            lawrec_record_get_state() == LAWREC_RECORD_STATE_STOPPING) {
-            resp->result = -EBUSY; resp->error_no = EBUSY;
-            snprintf(resp->message, sizeof(resp->message), "record owns encoder");
-            break;
-        }
         /*
          * 当前产品规则：只有预览已经被大核确认启动后，RTSP 才允许开启。
          * 这样可以避免在摄像头链路尚未打开时误起编码/推流流程。
@@ -408,11 +401,6 @@ extern "C" int lawrec_control_handle_record_cmd(lawrec_service_cmd_e cmd,
         if (lawrec_playback_active()) {
             resp->result = -EBUSY; resp->error_no = EBUSY;
             snprintf(resp->message, sizeof(resp->message), "playback owns media");
-            break;
-        }
-        if (rtsp_state_active(lawrec_rtsp_get_state())) {
-            resp->result = -EBUSY; resp->error_no = EBUSY;
-            snprintf(resp->message, sizeof(resp->message), "RTSP owns encoder");
             break;
         }
         if (!g_preview_active) {

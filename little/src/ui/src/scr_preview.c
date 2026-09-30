@@ -210,6 +210,7 @@ static void scr_preview_back_event(lv_event_t *e)
 static void scr_preview_record_event(lv_event_t *e)
 {
     (void)e;
+    if (g_back_pending) return;
     if (!lawrec_control_is_preview_active()) {
         scr_preview_set_record_button_unavailable();
         scr_preview_set_status("预览未就绪，无法开始录像", lv_color_hex(0xff6b6b));
@@ -235,6 +236,7 @@ static void scr_preview_record_event(lv_event_t *e)
 static void scr_preview_rtsp_event(lv_event_t *e)
 {
     (void)e;
+    if (g_back_pending) return;
 
     /*
      * 只有在 preview 已被确认启动后，RTSP 才允许切换。

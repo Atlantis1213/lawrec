@@ -12,6 +12,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <sstream>
 
 namespace {
 std::mutex settings_lock;
@@ -74,13 +75,101 @@ int save_file(const char *name, const std::string &data)
     unlink(temp.c_str());
     return ret;
 }
+
+lawrec_media_settings defaults() { return {1, LAWREC_RTSP_DEFAULT_PORT, 4000, 0, 0}; }
+bool valid_media(const lawrec_media_settings &s) {
+    return s.version == 1 && s.audio_enabled <= 1 && s.rtsp_port >= 1024 && s.rtsp_port <= 65535 &&
+           s.video_bitrate_kbps >= 1000 && s.video_bitrate_kbps <= 8000 &&
+           (!s.record_segment_seconds || (s.record_segment_seconds >= 60 && s.record_segment_seconds <= 3600));
+}
+int read_media(lawrec_media_settings &result) {
+    result = defaults();
+    const std::string path = directory() + "/lawrec-media.conf";
+    int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) {
+        if (errno != ENOENT) return -errno;
+        result.rtsp_port = load_port(); // Import the old one-field configuration.
+        return 0;
+    }
+    struct stat st{};
+    int error = 0;
+    char text[512] = {};
+    if (fstat(fd, &st)) error = -errno;
+    else if (!S_ISREG(st.st_mode) || st.st_size < 1 || st.st_size >= (off_t)sizeof(text)) error = -EINVAL;
+    ssize_t n = error ? -1 : read(fd, text, sizeof(text)-1);
+    if (!error && n != st.st_size) error = n < 0 ? -errno : -EIO;
+    close(fd);
+    if (error) return error;
+    std::istringstream lines(std::string(text, n));
+    std::string line;
+    lawrec_media_settings parsed{};
+    unsigned seen = 0;
+    while (std::getline(lines, line)) {
+        size_t equal = line.find('=');
+        if (equal == std::string::npos || equal+1 == line.size()) return -EINVAL;
+        std::string key = line.substr(0, equal), value = line.substr(equal+1);
+        unsigned number = 0;
+        for (unsigned char c : value) {
+            if (c < '0' || c > '9' || number > 65535) return -EINVAL;
+            number = number*10 + c-'0';
+        }
+        unsigned bit;
+        if (key == "version") { parsed.version = number; bit = 1; }
+        else if (key == "rtsp_port") { parsed.rtsp_port = number; bit = 2; }
+        else if (key == "video_bitrate_kbps") { parsed.video_bitrate_kbps = number; bit = 4; }
+        else if (key == "record_segment_seconds") { parsed.record_segment_seconds = number; bit = 8; }
+        else if (key == "audio_enabled") { parsed.audio_enabled = number; bit = 16; }
+        else return -EINVAL;
+        if (seen & bit) return -EINVAL;
+        seen |= bit;
+    }
+    if ((seen & 7) != 7 || !valid_media(parsed)) return -EINVAL;
+    result = parsed;
+    return 0;
+}
+const lawrec_media_settings &current_media() {
+    static const lawrec_media_settings current = [] {
+        lawrec_media_settings value;
+        int ret = read_media(value);
+        fprintf(stderr, "[settings] media load result=%d version=%u port=%u bitrate_kbps=%u segment_seconds=%u\n",
+                ret, value.version, value.rtsp_port, value.video_bitrate_kbps, value.record_segment_seconds);
+        return value;
+    }();
+    return current;
+}
+int save_media(const lawrec_media_settings &s) {
+    char data[128];
+    snprintf(data, sizeof(data), "version=%u\nrtsp_port=%u\nvideo_bitrate_kbps=%u\nrecord_segment_seconds=%u\naudio_enabled=%u\n",
+             s.version, s.rtsp_port, s.video_bitrate_kbps, s.record_segment_seconds, s.audio_enabled);
+    int ret = save_file("lawrec-media.conf", data);
+    fprintf(stderr, "[settings] media save result=%d port=%u bitrate_kbps=%u segment_seconds=%u restart_required=1\n",
+            ret, s.rtsp_port, s.video_bitrate_kbps, s.record_segment_seconds);
+    return ret;
+}
 }
 
 extern "C" int lawrec_settings_port(void)
 {
     // Snapshot never changes while an asynchronous media worker is alive.
-    static const int port = load_port();
-    return port;
+    return current_media().rtsp_port;
+}
+
+extern "C" int lawrec_settings_bitrate(void) { return current_media().video_bitrate_kbps; }
+extern "C" int lawrec_settings_segment_seconds(void) { return current_media().record_segment_seconds; }
+extern "C" int lawrec_settings_audio_enabled(void) { return current_media().audio_enabled; }
+extern "C" void lawrec_settings_media_current(lawrec_media_settings *result) {
+    if (result) *result = current_media();
+}
+extern "C" int lawrec_settings_media_pending(lawrec_media_settings *result) {
+    if (!result) return -EINVAL;
+    std::lock_guard<std::mutex> guard(settings_lock);
+    return read_media(*result);
+}
+extern "C" int lawrec_settings_media_save(const lawrec_media_settings *s) {
+    if (!s || !valid_media(*s)) return -EINVAL;
+    (void)current_media();
+    std::lock_guard<std::mutex> guard(settings_lock);
+    return save_media(*s);
 }
 
 extern "C" int lawrec_settings_save_port(unsigned port)
@@ -88,11 +177,11 @@ extern "C" int lawrec_settings_save_port(unsigned port)
     if (port < 1024 || port > 65535) return -EINVAL;
     (void)lawrec_settings_port();
     std::lock_guard<std::mutex> guard(settings_lock);
-    char text[32];
-    snprintf(text, sizeof(text), "%u\n", port);
-    int ret = save_file("lawrec-rtsp-port", text);
-    fprintf(stderr, "[settings] save port=%u result=%d restart_required=1\n", port, ret);
-    return ret;
+    lawrec_media_settings pending;
+    int ret = read_media(pending);
+    if (ret) return ret; // Do not silently discard an unreadable/newer config.
+    pending.rtsp_port = port;
+    return save_media(pending);
 }
 
 extern "C" int lawrec_settings_save_wifi(const char *ssid, const char *password)

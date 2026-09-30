@@ -17,6 +17,10 @@
 #include "lawrec_record_entry.h"
 #include "../../common/lawrec_storage.h"
 #include "../../common/lawrec_media.h"
+#include "../../common/lawrec_settings.h"
+#include "../../common/lawrec_frame_queue.h"
+#include "../../common/lawrec_encoder.h"
+#include "../../common/lawrec_audio.h"
 
 extern "C" {
 #include "k_vicap_comm.h"
@@ -53,26 +57,32 @@ struct RecordRuntime {
     uint64_t bytes_written{0};
     int last_error{0};
     std::string last_path;
-    std::vector<uint8_t> startup_idr;
+    std::vector<uint8_t> sps, pps;
     uint64_t startup_pts{0};
     uint64_t last_pts{0};
     int callback_count{0};
     bool got_first_frame{false};
     bool have_sps{false};
     bool have_pps{false};
+    unsigned segment_seconds{0}, segment_index{0};
+    uint64_t segment_pts{0}, segment_frames{0};
+    uint64_t segment_pts_us{0};
+    bool segment_idr_pending{false};
+    std::chrono::steady_clock::time_point segment_idr_requested_at;
     KD_HANDLE mp4_muxer{nullptr};
     KD_HANDLE video_track{nullptr};
+    KD_HANDLE audio_track{nullptr};
+    bool audio_enabled{false};
+    uint64_t audio_frames{0}, audio_last_pts_us{0};
     bool media_reused{false};
     bool sys_initialized{false};
     bool media_initialized{false};
-    bool venc_initialized{false};
-    bool callback_registered{false};
-    bool venc_started{false};
-    bool venc_bound{false};
     k_mp4_codec_id_e codec_id{K_MP4_CODEC_ID_H264};
 };
 
 RecordRuntime g_record;
+LawrecFrameQueue g_record_queue(64, 8*1024*1024);
+LawrecFrameQueue g_record_audio_queue(64, 128*1024);
 
 void record_set_state_locked(lawrec_record_state_e state, int last_error)
 {
@@ -90,22 +100,27 @@ void record_log_state(const char *tag, int last_error, const char *path = nullpt
 
 void reset_runtime_fields_locked()
 {
-    g_record.startup_idr.clear();
+    g_record.sps.clear(); g_record.pps.clear();
     g_record.startup_pts = 0;
     g_record.last_pts = 0;
     g_record.callback_count = 0;
     g_record.got_first_frame = false;
     g_record.elapsed_ms = g_record.bytes_written = 0;
     g_record.have_sps = g_record.have_pps = false;
+    g_record.segment_seconds = lawrec_settings_segment_seconds();
+    g_record.segment_index = 0;
+    g_record.segment_pts = g_record.segment_frames = 0;
+    g_record.segment_pts_us = 0;
+    g_record.segment_idr_pending = false;
     g_record.mp4_muxer = nullptr;
     g_record.video_track = nullptr;
+    g_record.audio_track = nullptr;
+    g_record.audio_enabled = lawrec_settings_audio_enabled() != 0;
+    g_record.audio_frames = 0;
+    g_record.audio_last_pts_us = 0;
     g_record.media_reused = false;
     g_record.sys_initialized = false;
     g_record.media_initialized = false;
-    g_record.venc_initialized = false;
-    g_record.callback_registered = false;
-    g_record.venc_started = false;
-    g_record.venc_bound = false;
 }
 
 int mkdirs(const char *path)
@@ -152,6 +167,102 @@ std::string build_record_path(const lawrec_record_config_t &config)
     return std::string(dir) + "/" + prefix + "_" + ts + ".mp4";
 }
 
+/* Called with record.lock held, or before registering the encoder callback.
+ * The encoder stays running across segment rotation; only the muxer changes. */
+int open_segment_locked()
+{
+    char path[128];
+    int ret = lawrec_storage_reserve(path, sizeof(path));
+    if (ret) return ret;
+    g_record.last_path = path;
+    k_mp4_config_s config{};
+    config.config_type = K_MP4_CONFIG_MUXER;
+    snprintf(config.muxer_config.file_name, sizeof(config.muxer_config.file_name), "%s", path);
+    ret = kd_mp4_create(&g_record.mp4_muxer, &config);
+    if (ret < 0) return ret;
+    k_mp4_track_info_s track{};
+    track.track_type = K_MP4_STREAM_VIDEO;
+    track.time_scale = 1000;
+    track.video_info.width = g_record.config.video_width;
+    track.video_info.height = g_record.config.video_height;
+    track.video_info.track_id = 1;
+    track.video_info.codec_id = g_record.codec_id;
+    ret = kd_mp4_create_track(g_record.mp4_muxer, &g_record.video_track, &track);
+    if (ret < 0) return ret;
+    g_record.segment_frames = 0;
+    g_record.audio_frames = 0;
+    g_record.segment_idr_pending = false;
+    ++g_record.segment_index;
+    record_log_state("segment opened", 0, path);
+    return 0;
+}
+
+int close_segment_locked(bool publish)
+{
+    int ret = 0;
+    if (g_record.mp4_muxer) {
+        int tracks = kd_mp4_destroy_tracks(g_record.mp4_muxer);
+        int close = kd_mp4_destroy(g_record.mp4_muxer);
+        if (tracks || close) ret = -EIO;
+        g_record.mp4_muxer = g_record.video_track = g_record.audio_track = nullptr;
+    }
+    if (g_record.audio_enabled && g_record.segment_frames && !g_record.audio_frames) ret = -ENODATA;
+    if (!ret && publish && g_record.segment_frames) {
+        char path[128];
+        ret = lawrec_storage_publish(g_record.last_path.c_str(), path, sizeof(path));
+        if (!ret) {
+            g_record.last_path = path;
+            record_log_state("segment published", 0, path);
+        }
+    }
+    return ret;
+}
+
+// Only the recording worker calls this writer. Drain up to the next video
+// boundary so an IDR rotation never puts future audio into the previous file.
+int record_audio_before(uint64_t boundary_us, LawrecFramePtr &pending,
+                        std::chrono::steady_clock::time_point &progress)
+{
+    if (!g_record.audio_enabled) return 0;
+    for (;;) {
+        if (!pending) {
+            int ret = g_record_audio_queue.pop(pending, 0);
+            if (ret <= 0) return ret;
+            progress = std::chrono::steady_clock::now();
+        }
+        if (pending->pts_us >= boundary_us) return 0;
+        std::lock_guard<std::mutex> guard(g_record.lock);
+        if (g_record.stop_requested) return 0;
+        if (g_record.segment_frames && pending->pts_us >= g_record.segment_pts_us) {
+            if (g_record.audio_frames && pending->pts_us < g_record.audio_last_pts_us) return -EINVAL;
+            if (!g_record.audio_track) {
+                // Creating audio before the first video write triggers the SDK's
+                // hardcoded G711U track path. Add our G711A track afterwards.
+                k_mp4_track_info_s track{};
+                track.track_type = K_MP4_STREAM_AUDIO;
+                track.time_scale = 8000;
+                track.audio_info.channels = 1;
+                track.audio_info.sample_rate = 8000;
+                track.audio_info.bit_per_sample = 16;
+                track.audio_info.track_id = 2;
+                track.audio_info.codec_id = K_MP4_CODEC_ID_G711A;
+                int ret = kd_mp4_create_track(g_record.mp4_muxer, &g_record.audio_track, &track);
+                if (ret) return ret;
+            }
+            k_mp4_frame_data_s frame{};
+            frame.codec_id = K_MP4_CODEC_ID_G711A;
+            frame.data = const_cast<uint8_t *>(pending->bytes.data());
+            frame.data_length = pending->bytes.size();
+            frame.time_stamp = pending->pts_us - g_record.segment_pts_us;
+            if (kd_mp4_write_frame(g_record.mp4_muxer, g_record.audio_track, &frame)) return -EIO;
+            g_record.bytes_written += frame.data_length;
+            g_record.audio_last_pts_us = pending->pts_us;
+            ++g_record.audio_frames;
+        }
+        pending.reset();
+    }
+}
+
 int record_video_callback_impl(k_u32 chn_num, kd_venc_data_s *data, k_u8 *private_data)
 {
     k_mp4_frame_data_s frame_data;
@@ -176,8 +287,8 @@ int record_video_callback_impl(k_u32 chn_num, kd_venc_data_s *data, k_u8 *privat
         const auto *p = reinterpret_cast<const uint8_t *>(pack.vir_addr);
         frame.insert(frame.end(), p, p + pack.len);
     }
-    bool key = false;
-    std::vector<uint8_t> headers;
+    bool key = false, vcl = false;
+    bool frame_sps = false, frame_pps = false;
     for (size_t i = 0; i + 3 < frame.size();) {
         size_t prefix = 0;
         if (!frame[i] && !frame[i+1] && frame[i+2] == 1) prefix = 3;
@@ -189,34 +300,62 @@ int record_video_callback_impl(k_u32 chn_num, kd_venc_data_s *data, k_u8 *privat
                  (frame[end+2] == 1 || (frame[end+2] == 0 && frame[end+3] == 1)))) ++end;
         if (end + 3 >= frame.size()) end = frame.size();
         int type = frame[i+prefix] & 31;
-        if (type == 7) g_record.have_sps = true;
-        if (type == 8) g_record.have_pps = true;
-        if (type == 5) key = true;
-        if (type == 7 || type == 8) headers.insert(headers.end(), frame.begin()+i, frame.begin()+end);
-        i = end;
-    }
-    if (!g_record.got_first_frame) {
-        if (g_record.startup_idr.size() + headers.size() > 64 * 1024) {
+        if (type >= 1 && type <= 5) vcl = true;
+        if ((type == 7 || type == 8) && end-i > 32*1024) {
             g_record.last_error = -EOVERFLOW; g_record.stop_requested = true;
             return -EOVERFLOW;
         }
-        g_record.startup_idr.insert(g_record.startup_idr.end(), headers.begin(), headers.end());
-        if (!key || !g_record.have_sps || !g_record.have_pps) return 0;
-        frame.insert(frame.begin(), g_record.startup_idr.begin(), g_record.startup_idr.end());
-        g_record.startup_idr.clear();
-        g_record.startup_pts = data->astPack[0].pts / 1000;
+        if (type == 7) {
+            g_record.have_sps = frame_sps = true;
+            g_record.sps.assign(frame.begin()+i, frame.begin()+end);
+        }
+        if (type == 8) {
+            g_record.have_pps = frame_pps = true;
+            g_record.pps.assign(frame.begin()+i, frame.begin()+end);
+        }
+        if (type == 5) key = true;
+        i = end;
     }
-    memset(&frame_data, 0, sizeof(frame_data));
-    frame_data.codec_id = g_record.codec_id;
-    frame_data.data = frame.data();
-    frame_data.data_length = frame.size();
+    if (!vcl) return 0;
     uint64_t pts = data->astPack[0].pts / 1000;
     if (pts < g_record.startup_pts || (g_record.got_first_frame && pts < g_record.last_pts)) {
         g_record.last_error = -EINVAL;
         g_record.stop_requested = true;
         return -EINVAL;
     }
-    frame_data.time_stamp = pts - g_record.startup_pts;
+    if (g_record.got_first_frame && g_record.segment_frames && key &&
+        g_record.segment_seconds && pts-g_record.segment_pts >= uint64_t(g_record.segment_seconds)*1000) {
+        int ret = close_segment_locked(true);
+        if (!ret) ret = open_segment_locked();
+        if (ret) {
+            g_record.last_error = ret; g_record.stop_requested = true;
+            g_record.state = LAWREC_RECORD_STATE_STOPPING;
+            record_log_state("segment rotation failed", ret);
+            return ret;
+        }
+    }
+    if (!g_record.segment_frames) {
+        if (!key || !g_record.have_sps || !g_record.have_pps) return 0;
+        std::vector<uint8_t> headers;
+        if (!frame_sps) headers.insert(headers.end(), g_record.sps.begin(), g_record.sps.end());
+        if (!frame_pps) headers.insert(headers.end(), g_record.pps.begin(), g_record.pps.end());
+        if (frame.size()+headers.size() > 4*1024*1024) {
+            g_record.last_error = -EOVERFLOW; g_record.stop_requested = true;
+            return -EOVERFLOW;
+        }
+        frame.insert(frame.begin(), headers.begin(), headers.end());
+        g_record.segment_pts = pts;
+        g_record.segment_pts_us = data->astPack[0].pts;
+        if (!g_record.got_first_frame) g_record.startup_pts = pts;
+    }
+    memset(&frame_data, 0, sizeof(frame_data));
+    frame_data.codec_id = g_record.codec_id;
+    frame_data.data = frame.data();
+    frame_data.data_length = frame.size();
+    // SDK mp4_format converts microseconds to milliseconds internally.
+    // Keep exact capture PTS here; the millisecond fields above are UI/rotation state.
+    if (data->astPack[0].pts < g_record.segment_pts_us) return -EINVAL;
+    frame_data.time_stamp = data->astPack[0].pts - g_record.segment_pts_us;
     if (kd_mp4_write_frame(g_record.mp4_muxer, g_record.video_track, &frame_data) < 0) {
         g_record.last_error = -EIO;
         g_record.stop_requested = true;
@@ -231,6 +370,7 @@ int record_video_callback_impl(k_u32 chn_num, kd_venc_data_s *data, k_u8 *privat
         record_log_state("first IDR written state=recording", 0);
     }
     g_record.bytes_written += frame.size();
+    ++g_record.segment_frames;
     g_record.last_pts = pts;
     ++g_record.callback_count;
     g_record.elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -261,39 +401,21 @@ int init_record_media(const lawrec_record_config_t &config)
 void cleanup_record_runtime()
 {
     { std::lock_guard<std::mutex> guard(g_record.lock); g_record.stop_requested = true; }
-    kd_venc_callback_s venc_callback;
+    g_record_queue.close();
+    g_record_audio_queue.close();
     int cleanup_error = 0;
     auto check = [&](const char *operation, int ret) {
         if (ret) { cleanup_error = ret; fprintf(stderr, "[record] %s failed=%d; restart required\n", operation, ret); }
     };
 
-    if (g_record.venc_bound) {
-        check("unbind", kd_mapi_venc_unbind_vi(VICAP_DEV_ID_0, kLawrecRecordVicapChn, kRecordVencChn));
-        g_record.venc_bound = false;
-    }
-    if (g_record.venc_started) {
-        check("stop", kd_mapi_venc_stop(kRecordVencChn));
-        g_record.venc_started = false;
-    }
-    if (g_record.callback_registered) {
-        memset(&venc_callback, 0, sizeof(venc_callback));
-        check("unregister", kd_mapi_venc_unregistercallback(kRecordVencChn, &venc_callback));
-        g_record.callback_registered = false;
-    }
-    if (g_record.venc_initialized) {
-        check("deinit", kd_mapi_venc_deinit(kRecordVencChn));
-        g_record.venc_initialized = false;
-    }
+    if (g_record.sys_initialized)
+        check("encoder unsubscribe", lawrec_encoder_unsubscribe(2));
+    if (g_record.sys_initialized && g_record.audio_enabled)
+        check("audio unsubscribe", lawrec_audio_unsubscribe(2));
     {
         std::lock_guard<std::mutex> guard(g_record.lock);
         if (cleanup_error) g_record.last_error = cleanup_error;
-        if (g_record.mp4_muxer != nullptr) {
-            int tracks_ret = kd_mp4_destroy_tracks(g_record.mp4_muxer);
-            int close_ret = kd_mp4_destroy(g_record.mp4_muxer);
-            if (tracks_ret || close_ret) g_record.last_error = -EIO;
-            g_record.mp4_muxer = nullptr;
-            g_record.video_track = nullptr;
-        }
+        if (close_segment_locked(false)) g_record.last_error = -EIO;
     }
     if (g_record.sys_initialized && !cleanup_error)
         lawrec_media_release(2);
@@ -302,13 +424,12 @@ void cleanup_record_runtime()
 
 void record_worker(lawrec_record_config_t config)
 {
-    k_mp4_config_s mp4_config;
-    k_mp4_track_info_s track_info;
-    k_venc_chn_attr chn_attr;
-    kd_venc_callback_s venc_callback;
     int ret;
     auto last_progress = std::chrono::steady_clock::now();
+    auto last_storage_check = last_progress;
     int last_count = 0;
+    LawrecFramePtr pending_audio;
+    auto audio_progress = last_progress;
 
     signal(SIGPIPE, SIG_IGN);
 
@@ -324,81 +445,21 @@ void record_worker(lawrec_record_config_t config)
         reset_runtime_fields_locked();
     }
 
-    char reserved_path[128];
-    ret = lawrec_storage_reserve(reserved_path, sizeof(reserved_path));
-    if (!ret) {
-        std::lock_guard<std::mutex> guard(g_record.lock);
-        g_record.last_path = reserved_path;
-    }
-    if (ret != 0)
-        goto fail;
-
     ret = init_record_media(config);
     if (ret != K_SUCCESS)
         goto fail;
 
-    memset(&mp4_config, 0, sizeof(mp4_config));
-    mp4_config.config_type = K_MP4_CONFIG_MUXER;
-    snprintf(mp4_config.muxer_config.file_name,
-             sizeof(mp4_config.muxer_config.file_name),
-             "%s", g_record.last_path.c_str());
-    ret = kd_mp4_create(&g_record.mp4_muxer, &mp4_config);
+    ret = open_segment_locked();
     if (ret < 0)
         goto fail;
 
-    memset(&track_info, 0, sizeof(track_info));
-    track_info.track_type = K_MP4_STREAM_VIDEO;
-    track_info.time_scale = 1000;
-    track_info.video_info.width = config.video_width;
-    track_info.video_info.height = config.video_height;
-    track_info.video_info.track_id = 1;
-    track_info.video_info.codec_id = g_record.codec_id;
-    ret = kd_mp4_create_track(g_record.mp4_muxer, &g_record.video_track, &track_info);
-    if (ret < 0)
+    ret = lawrec_encoder_subscribe(2, &g_record_queue);
+    if (ret != K_SUCCESS)
         goto fail;
-
-    memset(&chn_attr, 0, sizeof(chn_attr));
-    chn_attr.rc_attr.rc_mode = K_VENC_RC_MODE_CBR;
-    chn_attr.rc_attr.cbr.src_frame_rate = 30;
-    chn_attr.rc_attr.cbr.dst_frame_rate = 30;
-    chn_attr.rc_attr.cbr.bit_rate = 4000;
-    chn_attr.venc_attr.pic_width = config.video_width;
-    chn_attr.venc_attr.pic_height = config.video_height;
-    chn_attr.venc_attr.stream_buf_cnt = 30;
-    chn_attr.venc_attr.stream_buf_size =
-        ((config.video_width * config.video_height * 3 / 4 + 0xfff) & ~0xfff);
-    if (g_record.codec_id == K_MP4_CODEC_ID_H265) {
-        chn_attr.venc_attr.type = K_PT_H265;
-        chn_attr.venc_attr.profile = VENC_PROFILE_H265_MAIN;
-    } else {
-        chn_attr.venc_attr.type = K_PT_H264;
-        chn_attr.venc_attr.profile = VENC_PROFILE_H264_HIGH;
+    if (g_record.audio_enabled) {
+        ret = lawrec_audio_subscribe(2, &g_record_audio_queue);
+        if (ret) goto fail;
     }
-    ret = kd_mapi_venc_init(kRecordVencChn, &chn_attr);
-    if (ret != K_SUCCESS)
-        goto fail;
-    g_record.venc_initialized = true;
-
-    ret = kd_mapi_venc_enable_idr(kRecordVencChn, K_TRUE);
-    if (ret != K_SUCCESS)
-        goto fail;
-
-    memset(&venc_callback, 0, sizeof(venc_callback));
-    venc_callback.pfn_data_cb = record_video_callback;
-    ret = kd_mapi_venc_registercallback(kRecordVencChn, &venc_callback);
-    if (ret != K_SUCCESS)
-        goto fail;
-    g_record.callback_registered = true;
-
-    ret = kd_mapi_venc_start(kRecordVencChn, -1);
-    if (ret != K_SUCCESS)
-        goto fail;
-    g_record.venc_started = true;
-
-    ret = kd_mapi_venc_bind_vi(VICAP_DEV_ID_0, kLawrecRecordVicapChn, kRecordVencChn);
-    if (ret != K_SUCCESS)
-        goto fail;
-    g_record.venc_bound = true;
 
     {
         std::lock_guard<std::mutex> guard(g_record.lock);
@@ -409,6 +470,34 @@ void record_worker(lawrec_record_config_t config)
     last_progress = std::chrono::steady_clock::now();
 
     while (true) {
+        LawrecFramePtr frame;
+        int queued = g_record_queue.pop(frame, 20);
+        if (queued == 1) {
+            int audio_ret = record_audio_before(frame->pts_us, pending_audio, audio_progress);
+            if (audio_ret) {
+                std::lock_guard<std::mutex> guard(g_record.lock);
+                g_record.last_error = audio_ret;
+                g_record.stop_requested = true;
+                record_log_state("audio write/queue failed", audio_ret);
+            }
+            kd_venc_data_s data{};
+            data.status.cur_packs = 1;
+            data.astPack[0].vir_addr = reinterpret_cast<k_char *>(const_cast<uint8_t *>(frame->bytes.data()));
+            data.astPack[0].len = frame->bytes.size();
+            data.astPack[0].pts = frame->pts_us;
+            int write_ret = record_video_callback(kRecordVencChn, &data, nullptr);
+            if (write_ret) {
+                std::lock_guard<std::mutex> guard(g_record.lock);
+                g_record.last_error = write_ret;
+                g_record.stop_requested = true;
+            }
+        } else if (queued < 0 && queued != -ECANCELED) {
+            std::lock_guard<std::mutex> guard(g_record.lock);
+            g_record.last_error = queued;
+            g_record.stop_requested = true;
+            record_log_state("encoded queue failed", queued);
+        }
+        bool request_idr = false;
         {
             std::lock_guard<std::mutex> guard(g_record.lock);
             if (g_record.stop_requested) break;
@@ -417,14 +506,42 @@ void record_worker(lawrec_record_config_t config)
                 last_progress = now;
                 last_count = g_record.callback_count;
             }
-            int storage_ret = lawrec_storage_check(nullptr);
-            if (storage_ret || now - last_progress > std::chrono::seconds(8)) {
+            int storage_ret = 0;
+            if (now-last_storage_check >= std::chrono::milliseconds(100)) {
+                storage_ret = lawrec_storage_check(nullptr);
+                last_storage_check = now;
+            }
+            if (storage_ret || now - last_progress > std::chrono::seconds(8) ||
+                (g_record.audio_enabled && now-audio_progress > std::chrono::seconds(8))) {
                 g_record.last_error = storage_ret ? storage_ret : -ETIMEDOUT;
                 g_record.stop_requested = true;
                 g_record.state = LAWREC_RECORD_STATE_STOPPING;
             }
+            if (!g_record.stop_requested && g_record.segment_seconds && g_record.segment_frames &&
+                g_record.last_pts-g_record.segment_pts >= uint64_t(g_record.segment_seconds)*1000) {
+                if (!g_record.segment_idr_pending) {
+                    g_record.segment_idr_pending = true;
+                    g_record.segment_idr_requested_at = now;
+                    request_idr = true;
+                } else if (now-g_record.segment_idr_requested_at > std::chrono::seconds(5)) {
+                    g_record.last_error = -ETIMEDOUT;
+                    g_record.stop_requested = true;
+                    g_record.state = LAWREC_RECORD_STATE_STOPPING;
+                    record_log_state("segment IDR timeout", -ETIMEDOUT);
+                }
+            }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        // MAPI may wait on another thread. Never call it with record.lock held.
+        if (request_idr) {
+            int idr_ret = lawrec_encoder_request_idr();
+            record_log_state("segment IDR request", idr_ret);
+            if (idr_ret) {
+                std::lock_guard<std::mutex> guard(g_record.lock);
+                g_record.last_error = idr_ret;
+                g_record.stop_requested = true;
+                g_record.state = LAWREC_RECORD_STATE_STOPPING;
+            }
+        }
     }
 
     cleanup_record_runtime();
