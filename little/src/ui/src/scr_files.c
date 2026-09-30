@@ -1,6 +1,8 @@
 #include "ui_common.h"
 #include "key_proc.h"
 #include "../../common/lawrec_storage.h"
+#include "../../control/include/lawrec_control.h"
+#include "../../playback/lawrec_playback.h"
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
@@ -46,6 +48,19 @@ static void action(lv_event_t *e)
 {
     intptr_t cmd = (intptr_t)lv_event_get_user_data(e);
     if (cmd == 0) { confirming = 0; jump_to_scr_main(); return; }
+    if (lawrec_playback_active()) {
+        lv_label_set_text(summary, "Playback still owns media; stop it first"); return;
+    }
+    if (cmd == 5 && count) {
+        int ret = lawrec_control_playback_start(names[selected]);
+        if (ret) lv_label_set_text(summary, "Cannot play: stop preview/record/RTSP first, or check file");
+        else {
+            extern void jump_to_scr_playback(void);
+            confirming = 0;
+            jump_to_scr_playback();
+        }
+        return;
+    }
     if (cmd == 1) { refresh(); return; }
     if (cmd == 2 && count) selected = (selected + count - 1) % count;
     if (cmd == 3 && count) selected = (selected + 1) % count;
@@ -71,9 +86,9 @@ void jump_to_scr_files(void)
         lv_obj_align(summary, LV_ALIGN_TOP_MID, 0, 28);
         lv_obj_set_style_text_font(summary, &lawrec_font_cn_20, 0);
         lv_obj_set_style_text_color(summary, lv_color_hex(0xffffff), 0);
-        const char *titles[] = {"返回", "Refresh", "Previous", "Next", "Delete"};
-        lv_obj_t *buttons[5];
-        for (unsigned i = 0; i < 5; ++i) {
+        const char *titles[] = {"返回", "Refresh", "Previous", "Next", "Delete", "Play"};
+        lv_obj_t *buttons[6];
+        for (unsigned i = 0; i < 6; ++i) {
             buttons[i] = lv_btn_create(screen);
             lv_obj_set_size(buttons[i], 190, 66);
             lv_obj_set_pos(buttons[i], 20 + (i % 2) * 215, 470 + (i / 2) * 85);
@@ -82,7 +97,7 @@ void jump_to_scr_files(void)
             lv_obj_set_style_text_font(label, &lawrec_font_cn_20, 0);
             lv_label_set_text(label, titles[i]); lv_obj_center(label);
         }
-        group = lawrec_key_create_group(buttons, 5);
+        group = lawrec_key_create_group(buttons, 6);
     }
     refresh();
     lv_scr_load(screen);

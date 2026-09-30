@@ -174,12 +174,6 @@ static void scr_main_align_two_col(lv_obj_t *obj, lv_coord_t y, bool left_col,
     lv_obj_align(obj, LV_ALIGN_TOP_MID, left_col ? -x : x, y);
 }
 
-static void scr_main_show_placeholder(const char *title, const char *text)
-{
-    scr_main_set_status(title, lv_color_hex(0x6fdcff));
-    create_msgbox(title, text);
-}
-
 void scr_main_all_btn_enable(bool enable)
 {
     lv_obj_t *objs[] = {
@@ -216,13 +210,15 @@ static void scr_main_btn_import_event_handler(lv_event_t *e)
 static void scr_main_btn_delete_event_handler(lv_event_t *e)
 {
     (void)e;
-    scr_main_show_placeholder("系统设置", "视频档位 / AI / 防抖\n待接入");
+    extern void jump_to_scr_settings(void);
+    jump_to_scr_settings();
 }
 
 static void scr_main_btn_ota_event_handler(lv_event_t *e)
 {
     (void)e;
-    scr_main_show_placeholder("WiFi互传", "RTSP / WiFi 状态\n待接入");
+    extern void jump_to_scr_network(void);
+    jump_to_scr_network();
 }
 
 static void scr_main_create_menu_card(user_img_obj_t *slot, lv_obj_t *parent,
@@ -306,7 +302,7 @@ void setup_scr_scr_main(void)
     status_section = scr_main_create_section(lv_ui.scr_main_panel, 0, 92, 420,
                                              194, "设备状态");
     scr_main_center_horiz(status_section, 92);
-    obj = scr_main_create_info_chip(status_section, "画质 1080P60",
+    obj = scr_main_create_info_chip(status_section, "H.264 720P",
                                     LV_ALIGN_TOP_MID, 0, 0);
     scr_main_align_two_col(obj, 52, true, SCR_MAIN_INFO_W, 16);
     obj = scr_main_create_info_chip(status_section, "AI 关闭",
@@ -315,7 +311,7 @@ void setup_scr_scr_main(void)
     obj = scr_main_create_info_chip(status_section, "RTSP 待机",
                                     LV_ALIGN_TOP_MID, 0, 0);
     scr_main_align_two_col(obj, 118, true, SCR_MAIN_INFO_W, 16);
-    obj = scr_main_create_info_chip(status_section, "WiFi 就绪",
+    obj = scr_main_create_info_chip(status_section, "WiFi / IP",
                                     LV_ALIGN_TOP_MID, 0, 0);
     scr_main_align_two_col(obj, 118, false, SCR_MAIN_INFO_W, 16);
 

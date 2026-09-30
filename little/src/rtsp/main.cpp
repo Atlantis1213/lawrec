@@ -247,6 +247,7 @@ extern "C" int lawrec_rtsp_start_async(const lawrec_rtsp_config_t *config)
         if (g_rtsp.state == LAWREC_RTSP_STATE_STOPPING) {
             return -EBUSY;
         }
+        if (g_rtsp.worker_active) return -EBUSY;
 
         if (g_rtsp.worker.joinable())
             old_worker = std::move(g_rtsp.worker);
@@ -255,6 +256,7 @@ extern "C" int lawrec_rtsp_start_async(const lawrec_rtsp_config_t *config)
         g_rtsp.config = local_config;
         g_rtsp.stop_requested = false;
         rtsp_set_state_locked(LAWREC_RTSP_STATE_STARTING, 0);
+        g_rtsp.worker_active = true;
     }
 
     if (old_worker.joinable())

@@ -2,6 +2,7 @@
 #include <chrono>
 #include <thread>
 #include "streaming_player.h"
+#include "lawrec_settings.h"
 #include "../../common/lawrec_media.h"
 #include "../../common/lawrec_config.h"
 
@@ -91,7 +92,7 @@ StreamingPlayer::StreamingPlayer(const k_vicap_sensor_type &sensor_type,
     std::cout << "[lawrec-rtsp] create rtsp server begin" << std::endl;
     UserAuthenticationDatabase* authDB = nullptr;
     unsigned reclamationSeconds = 10;
-    rtspServer_ = RTSPServer::createNew(*env_, LAWREC_RTSP_DEFAULT_PORT, authDB, reclamationSeconds);
+    rtspServer_ = RTSPServer::createNew(*env_, lawrec_settings_port(), authDB, reclamationSeconds);
     if (!rtspServer_) {
         *env_ << "create rtsp server failed." << env_->getResultMsg() << "\n";
         env_->reclaim();
@@ -163,9 +164,13 @@ catch (...) {
     return -1;
 }
 
-static k_s32 sessionAudioCallback(k_u32 chn_num, k_audio_stream* stream_data, void* p_private_data) {
+static k_s32 sessionAudioCallback(k_u32 chn_num, k_audio_stream* stream_data, void* p_private_data) try {
     if (g_rtsp_stopping.load() || audio_session.g711LiveSource == nullptr)
         return 0;
+    if (!stream_data || !stream_data->stream || !stream_data->len || stream_data->len > 65536) {
+        fprintf(stderr, "[lawrec-rtsp] invalid audio callback payload\n");
+        return -1;
+    }
     unsigned long cb_count = ++g_audio_cb_count;
     if (cb_count <= 3 || (cb_count % 200) == 0) {
         printf("[lawrec-rtsp] audio cb count=%lu len=%u ts=%llu\n",
@@ -175,6 +180,11 @@ static k_s32 sessionAudioCallback(k_u32 chn_num, k_audio_stream* stream_data, vo
     audio_session.g711LiveSource->pushData((const uint8_t*)stream_data->stream, stream_data->len, stream_data->time_stamp);
 
     return 0;
+}
+catch (...) {
+    g_rtsp_stopping.store(true);
+    fprintf(stderr, "[lawrec-rtsp] audio callback allocation failure\n");
+    return -1;
 }
 
 int StreamingPlayer::StreamingPlayerInit() {

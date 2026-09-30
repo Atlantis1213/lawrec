@@ -13,7 +13,26 @@
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/statvfs.h>
+#include <sys/syscall.h>
 #include <unistd.h>
+
+extern "C" int lawrec_storage_open_recording(const char *name)
+{
+    if (!name || !*name || strchr(name, '/') || strchr(name, '\\')) return -EINVAL;
+    size_t length = strlen(name);
+    if (length < 5 || length >= 128 || strcmp(name + length - 4, ".mp4")) return -EINVAL;
+    int directory = open(lawrec_storage_dir(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (directory < 0) return -errno;
+    int fd = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    int error = errno;
+    close(directory);
+    if (fd < 0) return -error;
+    struct stat st{};
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_size == 0) {
+        close(fd); return -EINVAL;
+    }
+    return fd;
+}
 
 extern "C" const char *lawrec_storage_dir(void)
 {
@@ -47,6 +66,7 @@ extern "C" int lawrec_storage_check(uint64_t *available)
 
 extern "C" int lawrec_storage_reserve(char *path, size_t capacity)
 {
+    if (!path || !capacity) return -EINVAL;
     int ret = lawrec_storage_check(nullptr);
     if (ret) return ret;
     char date[32];
@@ -64,21 +84,32 @@ extern "C" int lawrec_storage_reserve(char *path, size_t capacity)
 
 extern "C" int lawrec_storage_publish(const char *partial, char *final_path, size_t capacity)
 {
+    if (!partial || !final_path || !capacity) return -EINVAL;
     std::string path(partial);
-    if (path.size() < 5 || path.substr(path.size()-5) != ".part") return -EINVAL;
+    const std::string prefix = std::string(lawrec_storage_dir()) + "/";
+    if (path.compare(0, prefix.size(), prefix) || path.size() <= prefix.size() + 5 ||
+        path.find('/', prefix.size()) != std::string::npos ||
+        path.substr(path.size()-5) != ".part") return -EINVAL;
     std::string final = path.substr(0, path.size()-5) + ".mp4";
     if (final.size() >= capacity) return -ENAMETOOLONG;
-    int fd = open(partial, O_RDONLY | O_NOFOLLOW);
-    if (fd < 0) return -errno;
-    int ret = fsync(fd) ? -errno : 0;
+    int directory = open(lawrec_storage_dir(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (directory < 0) return -errno;
+    int fd = openat(directory, path.c_str() + prefix.size(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) { int ret = -errno; close(directory); return ret; }
+    struct stat st{};
+    int ret = fstat(fd, &st) ? -errno : 0;
+    if (!ret && (!S_ISREG(st.st_mode) || st.st_size <= 0)) ret = -EINVAL;
+    if (!ret && fsync(fd)) ret = -errno;
     close(fd);
-    if (ret) return ret;
-    if (rename(partial, final.c_str())) return -errno;
-    snprintf(final_path, capacity, "%s", final.c_str());
-    fd = open(lawrec_storage_dir(), O_RDONLY | O_DIRECTORY);
-    if (fd < 0) return -errno;
-    ret = fsync(fd) ? -errno : 0;
-    close(fd);
+    // Never overwrite a completed recording. Unsupported filesystems fail
+    // closed and retain the .part file rather than falling back to rename().
+    if (!ret && syscall(SYS_renameat2, directory, path.c_str() + prefix.size(),
+                        directory, final.c_str() + prefix.size(), 1 /* RENAME_NOREPLACE */)) ret = -errno;
+    if (!ret) {
+        snprintf(final_path, capacity, "%s", final.c_str());
+        ret = fsync(directory) ? -errno : 0;
+    }
+    close(directory);
     return ret;
 }
 

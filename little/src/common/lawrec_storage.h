@@ -11,6 +11,8 @@ int lawrec_storage_reserve(char *path, size_t capacity);
 int lawrec_storage_publish(const char *partial, char *final_path, size_t capacity);
 int lawrec_storage_list(char *text, size_t capacity);
 int lawrec_storage_delete(const char *name);
+/* Returns a pinned read-only descriptor or a negative errno. Caller closes. */
+int lawrec_storage_open_recording(const char *name);
 #ifdef __cplusplus
 }
 #endif

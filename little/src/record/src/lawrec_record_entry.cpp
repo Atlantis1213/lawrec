@@ -463,7 +463,9 @@ extern "C" int lawrec_record_start_async(const lawrec_record_config_t *config)
     lawrec_record_config_t local_config{};
     std::thread old_worker;
 
-    if (config == nullptr || (config->video_type && strcmp(config->video_type, "h264")))
+    if (config == nullptr || (config->video_type && strcmp(config->video_type, "h264")) ||
+        (config->video_width > 0 && config->video_width != 1280) ||
+        (config->video_height > 0 && config->video_height != 720))
         return -EINVAL;
 
     {
@@ -472,6 +474,8 @@ extern "C" int lawrec_record_start_async(const lawrec_record_config_t *config)
             g_record.state == LAWREC_RECORD_STATE_RECORDING)
             return 0;
         if (g_record.state == LAWREC_RECORD_STATE_STOPPING)
+            return -EBUSY;
+        if (g_record.worker_active)
             return -EBUSY;
 
         if (g_record.worker.joinable())
@@ -493,6 +497,9 @@ extern "C" int lawrec_record_start_async(const lawrec_record_config_t *config)
 
         g_record.stop_requested = false;
         record_set_state_locked(LAWREC_RECORD_STATE_STARTING, 0);
+        // Reserve worker lifetime before dropping the lock: stop_wait must
+        // not report completion in the gap before std::thread is assigned.
+        g_record.worker_active = true;
     }
 
     if (old_worker.joinable())

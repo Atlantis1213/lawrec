@@ -27,6 +27,7 @@ int lawrec_control_get_rtsp_state(void);
 int lawrec_control_is_record_enabled(void);
 int lawrec_control_is_record_running(void);
 int lawrec_control_get_record_state(void);
+int lawrec_control_playback_start(const char *filename);
 
 /* UI 本地路径和 socket service 路径共用这一套 RTSP 控制入口。 */
 int lawrec_control_handle_rtsp_cmd(lawrec_service_cmd_e cmd,

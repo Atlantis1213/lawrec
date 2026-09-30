@@ -4,3 +4,32 @@
 **/build/
 *.o
 *.elf
+
+# Generated firmware and compiler output
+*.a
+*.so
+*.so.*
+*.img
+*.img.gz
+*.map
+*.log
+core
+core.*
+
+# Local credentials and board configuration (never commit real passwords)
+.env
+.env.*
+!.env.example
+/.codex/
+/.ssh/
+auth.json
+credentials.json
+*.pem
+*.key
+wpa_supplicant.conf
+
+# Editor and OS local files
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

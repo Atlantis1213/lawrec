@@ -7,10 +7,12 @@
 #include <mutex>
 
 #include "../../common/lawrec_config.h"
+#include "../../common/lawrec_settings.h"
 #include "../../common/lawrec_storage.h"
 #include "../../record/include/lawrec_record_entry.h"
 #include "../../rtsp/include/lawrec_rtsp_entry.h"
 #include "../include/lawrec_control.h"
+#include "../../playback/lawrec_playback.h"
 
 static const char *kDefaultStreamName = LAWREC_RTSP_DEFAULT_STREAM_NAME;
 static const char *kDefaultLogPath = LAWREC_LOG_PATH;
@@ -96,7 +98,7 @@ static void fill_rtsp_status(lawrec_rtsp_status_t *status)
         rtsp_state_active(rtsp_state) ? 1 : 0;
     status->state = (uint32_t)rtsp_state;
     status->last_error = lawrec_rtsp_get_last_error();
-    status->port = LAWREC_RTSP_DEFAULT_PORT;
+    status->port = lawrec_settings_port();
     snprintf(status->stream_name, sizeof(status->stream_name), "%s",
              kDefaultStreamName);
 }
@@ -132,6 +134,7 @@ extern "C" int lawrec_control_init(void)
 
 extern "C" void lawrec_control_deinit(void)
 {
+    lawrec_playback_stop();
     std::lock_guard<std::mutex> guard(g_control_lock);
 
     if (!g_initialized)
@@ -282,6 +285,11 @@ extern "C" int lawrec_control_handle_rtsp_cmd(lawrec_service_cmd_e cmd,
 
     switch (cmd) {
     case LAWREC_SERVICE_CMD_RTSP_START:
+        if (lawrec_playback_active()) {
+            resp->result = -EBUSY; resp->error_no = EBUSY;
+            snprintf(resp->message, sizeof(resp->message), "playback owns media");
+            break;
+        }
         if (lawrec_record_get_state() == LAWREC_RECORD_STATE_STARTING ||
             lawrec_record_get_state() == LAWREC_RECORD_STATE_RECORDING ||
             lawrec_record_get_state() == LAWREC_RECORD_STATE_STOPPING) {
@@ -326,7 +334,7 @@ extern "C" int lawrec_control_handle_rtsp_cmd(lawrec_service_cmd_e cmd,
 
         g_rtsp_enabled = 1;
         resp->result = 0;
-        snprintf(resp->message, sizeof(resp->message), "%s", "rtsp started");
+        snprintf(resp->message, sizeof(resp->message), "%s", "rtsp start accepted");
         log_line("rtsp start in-process sensor=%d stream=%s",
                  config.sensor_type, kDefaultStreamName);
         break;
@@ -353,7 +361,7 @@ extern "C" int lawrec_control_handle_rtsp_cmd(lawrec_service_cmd_e cmd,
 
         g_rtsp_enabled = 0;
         resp->result = 0;
-        snprintf(resp->message, sizeof(resp->message), "%s", "rtsp stopped");
+        snprintf(resp->message, sizeof(resp->message), "%s", "rtsp stop requested");
         log_line("rtsp stop in-process");
         break;
     case LAWREC_SERVICE_CMD_RTSP_QUERY:
@@ -397,6 +405,11 @@ extern "C" int lawrec_control_handle_record_cmd(lawrec_service_cmd_e cmd,
 
     switch (cmd) {
     case LAWREC_SERVICE_CMD_RECORD_START:
+        if (lawrec_playback_active()) {
+            resp->result = -EBUSY; resp->error_no = EBUSY;
+            snprintf(resp->message, sizeof(resp->message), "playback owns media");
+            break;
+        }
         if (rtsp_state_active(lawrec_rtsp_get_state())) {
             resp->result = -EBUSY; resp->error_no = EBUSY;
             snprintf(resp->message, sizeof(resp->message), "RTSP owns encoder");
@@ -432,7 +445,7 @@ extern "C" int lawrec_control_handle_record_cmd(lawrec_service_cmd_e cmd,
 
         g_record_enabled = 1;
         resp->result = 0;
-        snprintf(resp->message, sizeof(resp->message), "%s", "record started");
+        snprintf(resp->message, sizeof(resp->message), "%s", "record start accepted");
         log_line("record start accepted");
         break;
     case LAWREC_SERVICE_CMD_RECORD_STOP:
@@ -455,7 +468,7 @@ extern "C" int lawrec_control_handle_record_cmd(lawrec_service_cmd_e cmd,
 
         g_record_enabled = 0;
         resp->result = 0;
-        snprintf(resp->message, sizeof(resp->message), "%s", "record stopped");
+        snprintf(resp->message, sizeof(resp->message), "%s", "record stop requested");
         log_line("record stop in-process");
         break;
     case LAWREC_SERVICE_CMD_RECORD_QUERY:
@@ -472,4 +485,16 @@ extern "C" int lawrec_control_handle_record_cmd(lawrec_service_cmd_e cmd,
     fill_rtsp_status(&resp->rtsp);
     fill_record_status(&resp->record);
     return resp->result;
+}
+
+extern "C" int lawrec_control_playback_start(const char *filename)
+{
+    std::lock_guard<std::mutex> guard(g_control_lock);
+    int record = lawrec_record_get_state();
+    if (g_preview_requested || g_preview_active || rtsp_state_active(lawrec_rtsp_get_state()) ||
+        record == LAWREC_RECORD_STATE_STARTING || record == LAWREC_RECORD_STATE_RECORDING ||
+        record == LAWREC_RECORD_STATE_STOPPING) return -EBUSY;
+    int ret = lawrec_playback_start(filename);
+    log_line("playback start result=%d", ret);
+    return ret;
 }

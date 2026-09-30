@@ -25,6 +25,8 @@
 
 #include "msg_proc.h"
 #include "../../common/lawrec_preview_wire.h"
+#include "../../common/lawrec_playback_wire.h"
+#include "../../playback/lawrec_playback.h"
 #include "ui_common.h"
 #include <iostream>
 #include <mutex>
@@ -59,6 +61,22 @@ typedef struct {
 static msg_mgt_t msg_mgt;
 static std::atomic<int> ipcmsg_handle{-1};
 static std::atomic<int> ipc_status{0};
+
+extern "C" int lawrec_playback_display_request(int enabled)
+{
+    int id = ipcmsg_handle.load();
+    if (id < 0 || !kd_ipcmsg_is_connect(id)) return -ENOTCONN;
+    lawrec_playback_wire_t body = {LAWREC_PLAYBACK_VERSION, (uint32_t)enabled, 1280, 720};
+    auto *request = kd_ipcmsg_create_message(0, MSG_CMD_PLAYBACK_DISPLAY, &body, sizeof(body));
+    if (!request) return -ENOMEM;
+    k_ipcmsg_message_t *response = nullptr;
+    int ret = kd_ipcmsg_send_sync(id, request, &response, 3000);
+    if (!ret) ret = response ? response->s32RetVal : -EIO;
+    if (response) kd_ipcmsg_destroy_message(response);
+    kd_ipcmsg_destroy_message(request);
+    fprintf(stderr, "[playback] display request enabled=%d result=%d\n", enabled, ret);
+    return ret;
+}
 static uint32_t pending_preview = 0;
 static uint32_t preview_sequence = 0;
 static std::chrono::steady_clock::time_point preview_deadline;
@@ -676,6 +694,7 @@ int msg_proc_init(void)
 
 int msg_send_cmd(uint32_t cmd)
 {
+    if (cmd == MSG_CMD_PREVIEW_ENTER && lawrec_playback_active()) return -EBUSY;
     char tmp = 0;
     bool preview = cmd == MSG_CMD_PREVIEW_ENTER || cmd == MSG_CMD_PREVIEW_EXIT;
     if (preview && pending_preview) return -1;
@@ -711,6 +730,7 @@ int ui_msg_proc(void)
         scr_main_set_status(current_ipc_status == 1 ? "IPC connected" : "IPC offline",
                             lv_color_hex(current_ipc_status == 1 ? 0x4ade80 : 0xff6b6b));
         if (current_ipc_status != 1) {
+            lawrec_playback_stop();
             lawrec_control_note_preview_result(0);
             apply_preview_rtsp_state();
             apply_preview_record_state();

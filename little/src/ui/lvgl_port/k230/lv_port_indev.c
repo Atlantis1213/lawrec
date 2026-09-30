@@ -32,6 +32,7 @@
  *      INCLUDES
  *********************/
 #include "lv_port.h"
+#include <errno.h>
 #include <fcntl.h>
 #include <glob.h>
 #include <limits.h>
@@ -107,6 +108,8 @@ static void (*map)(int *evdev_root_x, int *evdev_root_y);
 static int map_width = 800;
 static int map_height = 1280;
 static FILE *touch_trace_fp;
+static bool touch_sync_lost;
+static bool touch_wait_release;
 
 /**********************
  *      MACROS
@@ -118,7 +121,29 @@ static FILE *touch_trace_fp;
 
 void lv_port_indev_init(void)
 {
-    fprintf(stderr, "lawrec indev: lv_port_indev disabled\n");
+    static lv_indev_drv_t driver;
+    static lv_indev_t *device;
+    const char *enabled = getenv("LAWREC_TOUCH_ENABLE");
+    if (enabled && strcmp(enabled, "0") == 0) {
+        fprintf(stderr, "lawrec indev: touch disabled by environment\n");
+        return;
+    }
+    if (device)
+        return;
+    touchpad_init();
+    if (touchpad_evdev.evdev_fd < 0)
+        return;
+    lv_indev_drv_init(&driver);
+    driver.type = LV_INDEV_TYPE_POINTER;
+    driver.read_cb = touchpad_read;
+    device = lv_indev_drv_register(&driver);
+    if (!device) {
+        fprintf(stderr, "lawrec indev: touch registration failed\n");
+        close(touchpad_evdev.evdev_fd);
+        touchpad_evdev.evdev_fd = -1;
+        return;
+    }
+    fprintf(stderr, "lawrec indev: touch enabled map=%dx%d\n", map_width, map_height);
 }
 
 /**********************
@@ -130,6 +155,7 @@ static void touchpad_init(void)
 
     if (evdev_fd != -1)
         close(evdev_fd);
+    touchpad_evdev.evdev_fd = -1;
 
     evdev_fd = touchpad_open_device();
     if (evdev_fd == -1) {
@@ -141,7 +167,11 @@ static void touchpad_init(void)
         int flags = fcntl(evdev_fd, F_GETFL, 0);
         if (flags < 0)
             flags = 0;
-        fcntl(evdev_fd, F_SETFL, flags | O_NONBLOCK);
+        if (fcntl(evdev_fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+            fprintf(stderr, "lawrec indev: nonblocking setup failed errno=%d\n", errno);
+            close(evdev_fd);
+            return;
+        }
     }
 
     touchpad_evdev.evdev_fd = evdev_fd;
@@ -184,6 +214,7 @@ static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
     int report_pending = 0;
 
     (void)indev_drv;
+    data->continue_reading = false;
 
     if (evdev_fd < 0) {
         data->state = LV_INDEV_STATE_REL;
@@ -194,8 +225,58 @@ static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
 
     while (1) {
         int rbytes = read(evdev_fd, &in, sizeof(in));
+        if (rbytes < 0 && errno == EINTR)
+            continue;
+        if (rbytes < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            fprintf(stderr, "lawrec indev: read failed errno=%d device=%s\n",
+                    errno, touchpad_evdev.devname);
+            close(evdev_fd);
+            touchpad_evdev.evdev_fd = -1;
+            evdev_button = LV_INDEV_STATE_REL;
+            break;
+        }
         if (rbytes < (int)sizeof(in))
             break;
+        if (in.type == EV_SYN && in.code == SYN_DROPPED) {
+            /* Cancel the gesture rather than turn a lost press into a click.
+             * Linux requires ignoring events through the next SYN_REPORT. */
+            touch_sync_lost = true;
+            touch_wait_release = true;
+            lv_indev_reset(lv_indev_get_act(), NULL);
+            evdev_button = LV_INDEV_STATE_REL;
+            btn_touching = 0;
+            report_pending = 0;
+            fprintf(stderr, "lawrec indev: SYN_DROPPED; cancel gesture and wait for release\n");
+            continue;
+        }
+        if (touch_sync_lost || touch_wait_release) {
+            if (in.type == EV_SYN && in.code == SYN_REPORT) {
+                unsigned long keys[(KEY_MAX + 8 * sizeof(unsigned long)) /
+                                   (8 * sizeof(unsigned long))] = {0};
+                struct input_absinfo x, y;
+                touch_sync_lost = false;
+                /* This board exports ABS_X/Y + BTN_TOUCH via the kernel's
+                 * pointer emulation. Re-snapshot, but do not resume a held
+                 * finger: require a clean release before a new gesture. */
+                if (touchpad_evdev.use_abs_xy &&
+                    ioctl(evdev_fd, EVIOCGKEY(sizeof(keys)), keys) >= 0 &&
+                    ioctl(evdev_fd, EVIOCGABS(ABS_X), &x) >= 0 &&
+                    ioctl(evdev_fd, EVIOCGABS(ABS_Y), &y) >= 0 &&
+                    !(keys[BTN_TOUCH / (8 * sizeof(unsigned long))] &
+                      (1UL << (BTN_TOUCH % (8 * sizeof(unsigned long)))))) {
+                    sample_x = x.value;
+                    sample_y = y.value;
+                    active_tracking_id = -1;
+                    mt_active_count = 0;
+                    sample_valid = 0;
+                    touch_wait_release = false;
+                    fprintf(stderr, "lawrec indev: resynchronized after release\n");
+                }
+                data->continue_reading = true;
+                break;
+            }
+            continue;
+        }
         if (in.type == EV_ABS) {
             if (touchpad_evdev.use_abs_xy && in.code == ABS_X) {
                 sample_x = in.value;
@@ -308,6 +389,10 @@ static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
 
                 report_pending = 0;
             }
+            /* Deliver each complete frame to LVGL: draining through release
+             * here would erase a short press before LVGL can observe it. */
+            data->continue_reading = true;
+            break;
         }
     }
 
@@ -470,6 +555,8 @@ static bool touchpad_is_touch_device(int fd, const char *devname)
 
     if (strstr(name, "gpio_keys") != NULL)
         return false;
+
+    fprintf(stderr, "lawrec indev: candidate %s name=%s\n", devname, name);
 
     return true;
 }

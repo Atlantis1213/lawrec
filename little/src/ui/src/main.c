@@ -37,6 +37,8 @@
 #include "../../control/include/lawrec_control.h"
 #include "../../record/include/lawrec_record_entry.h"
 #include "../../rtsp/include/lawrec_rtsp_entry.h"
+#include "../../playback/lawrec_playback.h"
+#include "lawrec_network.h"
 
 static volatile sig_atomic_t stop_requested;
 static void stop_signal(int signo) { (void)signo; stop_requested = 1; }
@@ -89,7 +91,7 @@ int main(void)
     signal(SIGPIPE, SIG_IGN);
     set_mallopt();
     setup_log_streams();
-    fprintf(stderr, "lawrec ui build: v1.0.0-rc1 single-process " __DATE__ " " __TIME__ "\n");
+    fprintf(stderr, "lawrec ui build: media-settings-dev single-process " __DATE__ " " __TIME__ "\n");
 
     /*
      * UI 侧也要初始化 control，
@@ -99,7 +101,7 @@ int main(void)
     lawrec_control_init();
     lv_init();
     lv_port_disp_init();
-    fprintf(stderr, "lawrec indev: touch disabled\n");
+    lv_port_indev_init();
 
     setup_scr_scr_main();
     lawrec_key_init();
@@ -122,7 +124,10 @@ int main(void)
             usleep(1 * 1000);
     }
 
+    lawrec_network_shutdown();
     lawrec_control_note_preview_request(0);
+    int playback_ret = lawrec_playback_stop_wait(5000);
+    if (playback_ret) fprintf(stderr, "[playback] shutdown timeout=%d\n", playback_ret);
     int record_ret = lawrec_record_stop_wait(5000);
     int rtsp_ret = lawrec_rtsp_stop_wait(5000);
     fprintf(stderr, "lawrec shutdown record=%d rtsp=%d\n", record_ret, rtsp_ret);

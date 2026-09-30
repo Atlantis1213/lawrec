@@ -9,6 +9,7 @@
 #include "lawrec_rtsp_compat.h"
 #include "lawrec_preview.h"
 #include "../little/src/common/lawrec_preview_wire.h"
+#include "../little/src/common/lawrec_playback_wire.h"
 #include "util.h"
 #include "mpi_sys_api.h"
 
@@ -216,6 +217,40 @@ static void sample_vicap_unbind_vo(k_mpp_chn vicap_mpp_chn, k_mpp_chn vo_mpp_chn
 
 std::atomic<bool> quit(true);
 static LawrecPreviewController g_preview;
+static bool g_playback_display = false;
+
+/* Only switch video layers; connector/DSI/VO and Linux UI stay alive. */
+static int playback_display(const lawrec_playback_wire_t &request)
+{
+    if (!g_preview.BackendReady()) return -11;
+    if (!request.enabled) {
+        int ret = kd_mpi_vo_disable_video_layer(K_VO_LAYER0);
+        if (ret) return ret;
+        ret = kd_mpi_vo_enable_video_layer(K_VO_LAYER1);
+        if (!ret) g_playback_display = false;
+        return ret;
+    }
+    if (g_preview.Enabled() || g_preview.Bound()) return -16;
+    if (request.width != 1280 || request.height != 720) return -22;
+    k_vo_video_layer_attr attr = {};
+    attr.img_size.width = request.width;
+    attr.img_size.height = request.height;
+    attr.pixel_format = PIXEL_FORMAT_YVU_PLANAR_420;
+    attr.stride = (request.width / 8 - 1) | ((request.height - 1) << 16);
+    attr.func = K_VO_SCALER_ENABLE;
+    attr.scaler_attr.out_size.width = 480;
+    attr.scaler_attr.out_size.height = 270;
+    attr.scaler_attr.stride = (480 / 8 - 1) | ((270 - 1) << 16);
+    attr.display_rect.y = 200;
+    int ret = kd_mpi_vo_set_video_layer_attr(K_VO_LAYER0, &attr);
+    if (ret) return ret;
+    ret = kd_mpi_vo_disable_video_layer(K_VO_LAYER1);
+    if (ret) return ret;
+    ret = kd_mpi_vo_enable_video_layer(K_VO_LAYER0);
+    if (ret) kd_mpi_vo_enable_video_layer(K_VO_LAYER1);
+    else g_playback_display = true;
+    return ret;
+}
 static LawrecRtspCompat g_rtsp_compat(LAWREC_RTSP_DEFAULT_PORT,
                                       LAWREC_RTSP_DEFAULT_STREAM_NAME);
 
@@ -236,6 +271,7 @@ bool app_run = true;
 
 static int lawrec_preview_enter(void)
 {
+    if (g_playback_display) return -16;
     return g_preview.Enter(sample_sys_bind_init);
 }
 
@@ -415,6 +451,23 @@ int ipc_send_thread(ipc_msg_cmd_t cmd)
 void handle_feature(k_s32 s32Id, k_ipcmsg_message_t* msg)
 {
     if (!msg || (msg->u32BodyLen && !msg->pBody)) return;
+    if (msg->u32CMD == MSG_CMD_PLAYBACK_DISPLAY) {
+        int result = -22;
+        lawrec_playback_wire_t request = {};
+        if (msg->pBody && msg->u32BodyLen == sizeof(request)) {
+            memcpy(&request, msg->pBody, sizeof(request));
+            if (request.version == LAWREC_PLAYBACK_VERSION && request.enabled <= 1)
+                result = playback_display(request);
+        }
+        printf("[playback] display enabled=%u result=%d\n", request.enabled, result);
+        auto *response = kd_ipcmsg_create_resp_message(msg, result, NULL, 0);
+        if (response) {
+            int ret = kd_ipcmsg_send_async(s32Id, response, NULL);
+            if (ret) printf("[playback] response failed ret=%d\n", ret);
+            kd_ipcmsg_destroy_message(response);
+        }
+        return;
+    }
     if (msg->u32CMD == MSG_CMD_RTSP_START || msg->u32CMD == MSG_CMD_RTSP_STOP ||
         msg->u32CMD == MSG_CMD_RTSP_QUERY) {
         printf("[lawrec] unsupported RTSP business cmd=%u; Linux owns network output\n", msg->u32CMD);
@@ -1214,6 +1267,7 @@ void getFileNames(char *path, std::vector<std::string>& files)
 
 int main(int argc, char *argv[])
 {
+    printf("[lawrec] build media-playback-dev " __DATE__ " " __TIME__ "\n");
     struct sigaction sa;
     k_s32 mapi_ret = kd_mapi_sys_init();
     printf("[lawrec-big] mapi server init ret=%d\n", mapi_ret);
