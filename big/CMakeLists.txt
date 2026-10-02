@@ -17,12 +17,23 @@ set(src
     util.cc
     mobile_face.cc
     src/preview/lawrec_preview.cpp
+    src/common/lawrec_ipc_server.cpp
+    src/common/lawrec_display.cpp
     src/common/lawrec_rtsp_compat.cpp)
 set(bin lawrec.elf)
 set(script ./script/init.sh)
 set(CMAKE_INSTALL_PREFIX "${PROJECT_SOURCE_DIR}/../" CACHE STRING "The path to use for make install" FORCE)
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fopenmp -march=rv64imafdcv -mabi=lp64d -mcmodel=medany" CACHE STRING "" FORCE)
-set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS}")
+# The SDK toolchain appends these flags on every include. Remove the historical
+# cache accumulation and set them once on this target, preserving other user flags.
+set(lawrec_sdk_flags "(^|[ \t])(-fopenmp|-march=rv64imafdcv|-mabi=lp64d|-mcmodel=medany)([ \t]|$)")
+foreach(language C CXX)
+    set(flags "${CMAKE_${language}_FLAGS}")
+    while("${flags}" MATCHES "${lawrec_sdk_flags}")
+        string(REGEX REPLACE "${lawrec_sdk_flags}" " " flags "${flags}")
+    endwhile()
+    string(STRIP "${flags}" flags)
+    set(CMAKE_${language}_FLAGS "${flags}" CACHE STRING "User ${language} flags" FORCE)
+endforeach()
 set(k230_opencv ${k230_sdk}/src/big/utils/lib/opencv)
 set(CMAKE_INSTALL_PREFIX "../")
 include_directories(${k230_opencv}/include/opencv4/)
@@ -57,6 +68,10 @@ link_directories(${k230_sdk}/src/common/cdk/user/mapi/mediaserver/lib)
 link_directories(${k230_sdk}/src/big/rt-smart/userapps/sdk/rt-thread/lib/risc-v/rv64)
 
 add_executable(${bin} ${src})
+target_compile_options(${bin} PRIVATE -fopenmp -march=rv64imafdcv -mabi=lp64d -mcmodel=medany)
+# CMake 3.2 has no target_link_options; keep the compiler driver's ABI/OpenMP
+# selection on the link step as well as compilation.
+set_property(TARGET ${bin} APPEND_STRING PROPERTY LINK_FLAGS " -fopenmp -march=rv64imafdcv -mabi=lp64d -mcmodel=medany")
 target_link_libraries(${bin}
     -Wl,--start-group
     rvv

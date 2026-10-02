@@ -30,6 +30,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <string.h>
 #include <fcntl.h>
 #include <sys/file.h>
 #include "lv_port.h"
@@ -40,6 +41,7 @@
 #include "../../playback/lawrec_playback.h"
 #include "lawrec_network.h"
 #include "lawrec_settings.h"
+#include "lawrec_media.h"
 
 static volatile sig_atomic_t stop_requested;
 static void stop_signal(int signo) { (void)signo; stop_requested = 1; }
@@ -80,8 +82,24 @@ static void setup_log_streams(void)
         setvbuf(stderr, NULL, _IOLBF, 0);
 }
 
-int main(void)
+int main(int argc, char *argv[])
 {
+    if (argc == 3 && !strcmp(argv[1], "--mp4-demux")) {
+        extern int lawrec_demux_helper(int argc, char **argv);
+        return lawrec_demux_helper(argc, argv);
+    }
+    if (argc == 2 && !strcmp(argv[1], "--ipv4-boot"))
+        return lawrec_network_boot_configure() ? 1 : 0;
+    if (argc == 2 && !strcmp(argv[1], "--ipv4-stage"))
+        return lawrec_settings_ipv4_stage_boot() ? 1 : 0;
+    if (argc == 2 && !strcmp(argv[1], "--dhcp-stop"))
+        return lawrec_network_dhcp_stop() ? 1 : 0;
+    if (argc == 4 && !strcmp(argv[1], "--dhcp-hook"))
+        return lawrec_network_dhcp_hook(argv[2], argv[3]) ? 1 : 0;
+    if (argc != 1) {
+        fprintf(stderr, "Usage: %s [--ipv4-stage|--ipv4-boot|--dhcp-stop|--dhcp-hook EVENT JOB]\n", argv[0]);
+        return 2;
+    }
     int lock_fd = open("/var/run/lawrec-ui.lock", O_CREAT | O_RDWR, 0600);
     if (lock_fd < 0 || flock(lock_fd, LOCK_EX | LOCK_NB)) {
         fprintf(stderr, "lawrec: another UI instance owns the device or lock unavailable\n");
@@ -94,7 +112,7 @@ int main(void)
     setup_log_streams();
     /* Freeze media settings at process startup, not at the first recording. */
     (void)lawrec_settings_port();
-    fprintf(stderr, "lawrec ui build: media-settings-dev single-process " __DATE__ " " __TIME__ "\n");
+    fprintf(stderr, "lawrec ui build: touch-ui-lckfb-dev single-process " __DATE__ " " __TIME__ "\n");
 
     /*
      * UI 侧也要初始化 control，
@@ -130,12 +148,14 @@ int main(void)
     lawrec_network_shutdown();
     lawrec_control_note_preview_request(0);
     int playback_ret = lawrec_playback_stop_wait(5000);
-    if (playback_ret) fprintf(stderr, "[playback] shutdown timeout=%d\n", playback_ret);
+    if (playback_ret) fprintf(stderr, "[playback] shutdown result=%d\n", playback_ret);
     int record_ret = lawrec_record_stop_wait(5000);
     int rtsp_ret = lawrec_rtsp_stop_wait(5000);
-    fprintf(stderr, "lawrec shutdown record=%d rtsp=%d\n", record_ret, rtsp_ret);
+    const unsigned retained_media = lawrec_media_owner_mask();
+    fprintf(stderr, "lawrec shutdown playback=%d record=%d rtsp=%d media_owners=%u\n",
+            playback_ret, record_ret, rtsp_ret, retained_media);
     fflush(NULL);
     /* SDK IPC/input threads live for process lifetime; avoid C++ static
        destruction racing those threads after the media workers are drained. */
-    _Exit(record_ret || rtsp_ret ? 1 : 0);
+    _Exit(playback_ret || record_ret || rtsp_ret || retained_media ? 1 : 0);
 }

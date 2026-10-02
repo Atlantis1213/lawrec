@@ -9,6 +9,8 @@
 #include "../../common/lawrec_config.h"
 #include "../../common/lawrec_settings.h"
 #include "../../common/lawrec_storage.h"
+#include "../../common/lawrec_time.h"
+#include "../../common/lawrec_media.h"
 #include "../../record/include/lawrec_record_entry.h"
 #include "../../rtsp/include/lawrec_rtsp_entry.h"
 #include "../include/lawrec_control.h"
@@ -24,6 +26,7 @@ static int g_initialized = 0;
 static int g_preview_requested = 0;
 /* 大核已经明确返回：预览链路已真正启动并可用。 */
 static int g_preview_active = 0;
+static int g_external_playback_display = 0;
 /* 面向用户的目标状态：在条件满足时 RTSP 应该处于开启态。 */
 static int g_rtsp_enabled = 0;
 /* 录像状态与 RTSP 平级，由 control 统一收敛。 */
@@ -128,7 +131,8 @@ extern "C" int lawrec_control_init(void)
         return 0;
 
     g_initialized = 1;
-    log_line("control init");
+    g_preview_requested = 1;
+    log_line("control init display unverified; playback blocked until synchronization");
     return 0;
 }
 
@@ -152,6 +156,7 @@ extern "C" void lawrec_control_deinit(void)
     }
     g_preview_requested = 0;
     g_preview_active = 0;
+    g_external_playback_display = 0;
     g_rtsp_enabled = 0;
     g_record_enabled = 0;
     g_initialized = 0;
@@ -175,7 +180,8 @@ extern "C" void lawrec_control_note_preview_request(int enabled)
      * 这里记录的是 UI 侧的“乐观请求边沿”。
      * 一旦 UI 请求退出预览，就必须同步拉停 RTSP，因为推流依赖底层预览/采集链路存活。
      */
-    g_preview_requested = enabled ? 1 : 0;
+    /* Sending EXIT is not evidence that the big core released its display layer. */
+    g_preview_requested = 1;
     if (!enabled) {
         g_preview_active = 0;
         if (rtsp_state_active(lawrec_rtsp_get_state())) {
@@ -191,7 +197,8 @@ extern "C" void lawrec_control_note_preview_request(int enabled)
             log_line("preview request disabled, stop record");
         }
     }
-    log_line("preview request enabled=%d", g_preview_requested);
+    log_line("preview request enabled=%d reserved=%d active=%d", enabled ? 1 : 0,
+             g_preview_requested, g_preview_active);
 }
 
 extern "C" void lawrec_control_note_preview_result(int enabled)
@@ -204,6 +211,7 @@ extern "C" void lawrec_control_note_preview_result(int enabled)
      * 只要预览失败或退出，RTSP 也必须回到空闲态。
      */
     g_preview_active = enabled ? 1 : 0;
+    if (g_preview_active) g_external_playback_display = 0;
     if (!g_preview_active) {
         g_preview_requested = 0;
         g_rtsp_enabled = 0;
@@ -227,6 +235,55 @@ extern "C" int lawrec_control_is_preview_active(void)
 {
     std::lock_guard<std::mutex> guard(g_control_lock);
     return g_preview_active;
+}
+
+extern "C" void lawrec_control_note_preview_uncertain(void)
+{
+    lawrec_control_note_preview_request(0);
+    std::lock_guard<std::mutex> guard(g_control_lock);
+    log_line("preview result uncertain requested=%d active=%d playback_blocked=1",
+             g_preview_requested, g_preview_active);
+}
+
+extern "C" int lawrec_control_preview_needs_close(void)
+{
+    std::lock_guard<std::mutex> guard(g_control_lock);
+    return g_preview_requested || g_preview_active || g_external_playback_display;
+}
+
+extern "C" void lawrec_control_note_display_status(int ready, int preview_occupied, int playback_occupied)
+{
+    std::lock_guard<std::mutex> guard(g_control_lock);
+    g_external_playback_display = playback_occupied ? 1 : 0;
+    g_preview_requested = !ready || preview_occupied;
+    g_preview_active = 0;
+    log_line("display sync ready=%d preview_occupied=%d playback_occupied=%d; no capture resumed",
+             ready, preview_occupied, playback_occupied);
+}
+
+extern "C" int lawrec_control_prepare_display_recovery(void)
+{
+    std::lock_guard<std::mutex> guard(g_control_lock);
+    const int record = lawrec_record_get_state();
+    if (g_preview_active || rtsp_state_active(lawrec_rtsp_get_state()) ||
+        record == LAWREC_RECORD_STATE_STARTING || record == LAWREC_RECORD_STATE_RECORDING ||
+        record == LAWREC_RECORD_STATE_STOPPING || lawrec_playback_active() || lawrec_media_owner_mask()) {
+        log_line("display recovery rejected result=%d", -EBUSY);
+        return -EBUSY;
+    }
+    g_preview_requested = 1;
+    log_line("display recovery requested; media starts blocked");
+    return 0;
+}
+
+extern "C" void lawrec_control_finish_display_recovery(int result)
+{
+    std::lock_guard<std::mutex> guard(g_control_lock);
+    g_preview_active = 0;
+    g_preview_requested = result ? 1 : 0;
+    if (!result) g_external_playback_display = 0;
+    log_line("display recovery result=%d preview_reserved=%d external_playback=%d codecs_recovered=0",
+             result, g_preview_requested, g_external_playback_display);
 }
 
 extern "C" int lawrec_control_is_rtsp_enabled(void)
@@ -479,10 +536,30 @@ extern "C" int lawrec_control_playback_start(const char *filename)
 {
     std::lock_guard<std::mutex> guard(g_control_lock);
     int record = lawrec_record_get_state();
-    if (g_preview_requested || g_preview_active || rtsp_state_active(lawrec_rtsp_get_state()) ||
+    if (g_preview_requested || g_preview_active || g_external_playback_display || rtsp_state_active(lawrec_rtsp_get_state()) ||
         record == LAWREC_RECORD_STATE_STARTING || record == LAWREC_RECORD_STATE_RECORDING ||
         record == LAWREC_RECORD_STATE_STOPPING) return -EBUSY;
     int ret = lawrec_playback_start(filename);
     log_line("playback start result=%d", ret);
+    return ret;
+}
+
+extern "C" int lawrec_control_set_time_utc(const char *text)
+{
+    // Hold the same lock as all media starts through the clock update. A UI-only
+    // state check leaves a window in which the command worker can start RTSP.
+    std::lock_guard<std::mutex> guard(g_control_lock);
+    int rtsp = lawrec_rtsp_get_state();
+    int record = lawrec_record_get_state();
+    if (rtsp_state_active(rtsp) ||
+        record == LAWREC_RECORD_STATE_STARTING ||
+        record == LAWREC_RECORD_STATE_RECORDING ||
+        record == LAWREC_RECORD_STATE_STOPPING || lawrec_playback_active()) {
+        log_line("time set rejected result=%d rtsp=%d record=%d playback=%d",
+                 -EBUSY, rtsp, record, lawrec_playback_active());
+        return -EBUSY;
+    }
+    int ret = lawrec_time_set_utc(text);
+    log_line("time set result=%d rtc_updated=0", ret);
     return ret;
 }

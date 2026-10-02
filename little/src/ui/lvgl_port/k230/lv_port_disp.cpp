@@ -510,7 +510,9 @@ static int disp_init(void)
 #if defined(CONFIG_BOARD_K230_CANMV_LCKFB)
     display_width = LAWREC_UI_DISP_HOR_RES;
     display_height = LAWREC_UI_DISP_VER_RES;
-    input_map_config(MAP_MODE_CLAMP_ONLY, display_width, display_height);
+    /* Portrait panel reports the opposite horizontal direction; keep Y intact. */
+    input_map_config(MAP_MODE_LCKFB_REFLECT_X, display_width, display_height);
+    fprintf(stderr, "[lawrec-ui] touch map=reflect-x x=479-raw_x y=raw_y\n");
 #else
     display_width = screen_width;
     display_height = screen_height / 2;
@@ -608,6 +610,18 @@ static void disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area,
     if (disp_drv->draw_buf->last_area != 1 ||
         disp_drv->draw_buf->last_part != 1)
         return;
+
+#if defined(CONFIG_BOARD_K230_CANMV_LCKFB)
+    /* Log opacity transitions, not every refresh: zero exposes the camera layer. */
+    static int last_center_alpha = -1;
+    uint16_t center = ((uint16_t *)lvgl_buf)[(display_height / 2) * display_width + display_width / 2];
+    int center_alpha = center >> 12;
+    if (center_alpha != last_center_alpha) {
+        fprintf(stderr, "[lawrec-ui] overlay center alpha=%d/15 pixel=0x%04x plane_id=%u\n",
+                center_alpha, center, drm_dev.planes[ui_plane_idx].id);
+        last_center_alpha = center_alpha;
+    }
+#endif
 
     while (1) {
         uint64_t index;

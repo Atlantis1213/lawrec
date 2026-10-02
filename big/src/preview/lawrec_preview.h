@@ -8,7 +8,7 @@
 #include "k_video_comm.h"
 
 typedef int (*lawrec_preview_bind_fn_t)(void);
-typedef void (*lawrec_preview_unbind_fn_t)(k_mpp_chn, k_mpp_chn);
+typedef int (*lawrec_preview_unbind_fn_t)(k_mpp_chn, k_mpp_chn);
 
 class LawrecPreviewController {
   public:
@@ -26,6 +26,8 @@ class LawrecPreviewController {
     bool BackendReady() const;
     bool Enabled() const;
     bool Bound() const;
+    void Snapshot(bool *ready, bool *enabled, bool *bound);
+    void ProbeFrame();
 
   private:
     void FillBindChannels(k_mpp_chn *vicap_mpp_chn, k_mpp_chn *vo_mpp_chn) const;
@@ -36,6 +38,7 @@ class LawrecPreviewController {
     std::atomic<bool> enabled_;
     std::atomic<bool> bound_;
     pthread_mutex_t lock_;
+    k_u32 blank_pool_id_;
     k_vb_blk_handle blank_block_;
     k_video_frame_info blank_vf_;
     void *blank_vaddr_;

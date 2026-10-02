@@ -68,7 +68,7 @@ LawrecWifiResult lawrec_wifi_connect(LawrecWifiBackend &b, const std::string &ss
         return result;
     }
     const std::string id = std::to_string(added);
-    bool selected = false;
+    bool selected = false, begun = false;
     try {
         const char digits[] = "0123456789abcdef";
         std::string hex;
@@ -78,6 +78,8 @@ LawrecWifiResult lawrec_wifi_connect(LawrecWifiBackend &b, const std::string &ss
         if (!ret) ret = ok(b, "SET_NETWORK " + id + " key_mgmt WPA-PSK");
         if (!ret) ret = ok(b, "SET_NETWORK " + id + " proto RSN");
         if (!ret) ret = ok(b, "SET_NETWORK " + id + " scan_ssid 1");
+        if (!ret) { ret = b.begin(); begun = !ret; }
+        if (!ret) ret = b.before_select();
         if (!ret) {
             // A response timeout does not prove SELECT was not applied.
             selected = true;
@@ -85,6 +87,7 @@ LawrecWifiResult lawrec_wifi_connect(LawrecWifiBackend &b, const std::string &ss
         }
         if (!ret) ret = b.wait_connected(added, false);
         if (!ret) ret = b.dhcp(false);
+        if (!ret) ret = b.commit(false);
         if (!ret) { result.changed = true; return result; }
     } catch (...) { ret = -EFAULT; }
     result.error = ret;
@@ -92,6 +95,13 @@ LawrecWifiResult lawrec_wifi_connect(LawrecWifiBackend &b, const std::string &ss
     // Never stop recovery just because the user closed the UI during a switch.
     // Keep the original failure separate from the rollback result.
     try {
+        if (begun) {
+            int stopped = b.before_rollback();
+            record(stopped);
+            // Do not select/remove an active profile while its lease hook can
+            // still mutate wlan0. Leave the uncertainty marker for recovery.
+            if (stopped) return result;
+        }
         if (selected) {
             if (current >= 0) record(ok(b, "SELECT_NETWORK " + std::to_string(current), true));
             else record(ok(b, "DISCONNECT", true));
@@ -102,11 +112,14 @@ LawrecWifiResult lawrec_wifi_connect(LawrecWifiBackend &b, const std::string &ss
                 record(ok(b, (n.enabled ? "ENABLE_NETWORK " : "DISABLE_NETWORK ") +
                           std::to_string(n.id) + (n.enabled ? " no-connect" : ""), true));
             }
+        }
+        if (begun) {
             if (current >= 0) {
                 int associated = b.wait_connected(current, true);
                 record(associated);
                 if (!associated) record(b.dhcp(true));
-            }
+            } else record(b.restore_disconnected());
+            if (!result.rollback_error) record(b.commit(true));
         }
     } catch (...) { record(-EFAULT); }
     return result;

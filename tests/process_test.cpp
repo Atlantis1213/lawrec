@@ -4,8 +4,10 @@
 #include <thread>
 #include <chrono>
 #include <cstdio>
+#include <string>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 
 int main() {
     char log[] = "/tmp/lawrec-process-test-XXXXXX";
@@ -17,6 +19,14 @@ int main() {
     assert(lawrec_process_run(no, fail, 1000, cancel, log) == -ECHILD);
     assert(lawrec_process_run("/no-such-lawrec-program", ok, 1000, cancel, log) == -ENOENT);
     assert(lawrec_process_run(sleep, slow, 50, cancel, log) == -ETIMEDOUT);
+    assert(lawrec_process_run(sleep, slow, 50, cancel, log, false) == -ETIMEDOUT);
+    std::string unsafe = std::string(log)+".unsafe";
+    assert(symlink(log, unsafe.c_str()) == 0);
+    assert(lawrec_process_run(yes, ok, 1000, cancel, unsafe.c_str()) == -ELOOP);
+    unlink(unsafe.c_str());
+    assert(mkfifo(unsafe.c_str(), 0600) == 0);
+    assert(lawrec_process_run(yes, ok, 1000, cancel, unsafe.c_str()) == -ENXIO);
+    unlink(unsafe.c_str());
     std::thread aborter([&] {
         std::this_thread::sleep_for(std::chrono::milliseconds(50)); cancel = true;
     });

@@ -5,7 +5,9 @@
 #include "../../common/lawrec_annexb.h"
 
 H264LiveFrameSource* H264LiveFrameSource::createNew(UsageEnvironment &env, size_t queue_size) {
-    return new H264LiveFrameSource(env, queue_size);
+    auto *source = new H264LiveFrameSource(env, queue_size);
+    if (source->deliveryError()) { Medium::close(source); return nullptr; }
+    return source;
 }
 
 H264LiveFrameSource::H264LiveFrameSource(UsageEnvironment &env, size_t queue_size) : LiveFrameSource(env, queue_size) 
@@ -23,7 +25,16 @@ H264LiveFrameSource::parseFrame(std::shared_ptr<uint8_t> data, size_t data_size,
     size_t bufSize = data_size;
     size_t size = 0;
     uint8_t *buffer = this->extractFrame(data.get(), bufSize, size);
+    if (!buffer) { fail(-EBADMSG); return {}; }
+    unsigned nal_count = 0;
+    bool repeated_config = false;
     while (buffer != NULL) {
+        if (++nal_count > 128) { fail(-E2BIG); return {}; }
+        const unsigned type = buffer[0] & 31;
+        if (!type || type >= 24) { fail(-EBADMSG); return {}; }
+        if ((type == 7 || type == 8) && (size > 32 * 1024 || (type == 7 && size < 4))) {
+            fail(-EBADMSG); return {};
+        }
         switch (buffer[0] & 0x1F) {
             case 7:
                 fAuxLine.clear();
@@ -38,11 +49,12 @@ H264LiveFrameSource::parseFrame(std::shared_ptr<uint8_t> data, size_t data_size,
                 pps_size = size;
                 break;
             case 5:
-                if (fRepeatConfig && fSps && fPps) {
+                if (fRepeatConfig && !repeated_config && fSps && fPps) {
                     FramePacket sps(fSps, 0, sps_size, ref);
                     packetList.push_back(sps);
                     FramePacket pps(fPps, 0, pps_size, ref);
                     packetList.push_back(pps);
+                    repeated_config = true;
                 }
                 break;
             default:

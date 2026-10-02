@@ -38,12 +38,15 @@
 #include <sys/fcntl.h>
 #include <unistd.h>
 #include <cstring>
+#include <cstddef>
 #include "k_ipcmsg.h"
 #include "../../control/include/lawrec_control.h"
 #include "../../record/include/lawrec_record_entry.h"
 #include "../../rtsp/include/lawrec_rtsp_entry.h"
 
 using namespace std;
+static_assert(offsetof(ui_msg_t, data) % alignof(lawrec_record_status_t) == 0,
+              "UI payload must remain aligned for status snapshots");
 
 #define UI_MSG_QUEUE_MAX_COUNT 100
 #define IPCMSG_DEV_WAIT_RETRY_US (200 * 1000)
@@ -61,9 +64,13 @@ typedef struct {
 static msg_mgt_t msg_mgt;
 static std::atomic<int> ipcmsg_handle{-1};
 static std::atomic<int> ipc_status{0};
+static std::atomic<uint32_t> ipc_generation{0};
+/* Pin an SDK handle through sends/disconnect; an atomic integer alone cannot do this. */
+static std::mutex ipc_transport_lock;
 
 extern "C" int lawrec_playback_display_request(int enabled)
 {
+    std::lock_guard<std::mutex> lock(ipc_transport_lock);
     int id = ipcmsg_handle.load();
     if (id < 0 || !kd_ipcmsg_is_connect(id)) return -ENOTCONN;
     lawrec_playback_wire_t body = {LAWREC_PLAYBACK_VERSION, (uint32_t)enabled, 1280, 720};
@@ -79,11 +86,17 @@ extern "C" int lawrec_playback_display_request(int enabled)
 }
 static uint32_t pending_preview = 0;
 static uint32_t preview_sequence = 0;
+static uint32_t preview_connection_generation = 0;
 static std::chrono::steady_clock::time_point preview_deadline;
+static bool display_query_pending = false;
+static uint32_t display_query_sequence = 0, display_query_generation = 0;
+static uint32_t display_sync_generation = UINT32_MAX;
+static std::chrono::steady_clock::time_point display_query_deadline, display_query_retry;
 
 static ui_msg_t *ui_msg_alloc(uint32_t size);
 static int ui_msg_put(ui_msg_t *pmsg);
-static int msg_send_data(uint32_t cmd, void *payload, uint32_t payload_len);
+static int msg_send_data(uint32_t cmd, void *payload, uint32_t payload_len,
+                         uint32_t *connection_generation = nullptr);
 
 static void apply_preview_rtsp_state(void)
 {
@@ -94,7 +107,7 @@ static void apply_preview_rtsp_state(void)
      * 当前产品里 preview 和 RTSP 是耦合关系：
      * 只有大核侧预览真正起来后，RTSP 按钮才允许进入可操作状态。
      */
-    if (!preview_active) {
+    if (!preview_active || scr_preview_is_back_pending()) {
         scr_preview_set_rtsp_button_unavailable();
         return;
     }
@@ -122,7 +135,7 @@ static void apply_preview_record_state(void)
     int preview_active = lawrec_control_is_preview_active();
     int record_state = lawrec_control_get_record_state();
 
-    if (!preview_active) {
+    if (!preview_active || scr_preview_is_back_pending()) {
         scr_preview_set_record_button_unavailable();
         return;
     }
@@ -371,12 +384,30 @@ static void* thread_local_rtsp_status(void* arg)
 
 static void msg_recv(int handle, k_ipcmsg_message_t* msg)
 {
+    if (handle != ipcmsg_handle.load() || ipc_status.load() != 1) return;
     if (!msg || !msg->pBody || msg->u32BodyLen < 1) {
         printf("IPCMSG: reject empty response\n");
         return;
     }
     /* 大核回包在这里转换成 UI 线程可消费的队列消息。 */
     switch (msg->u32CMD) {
+    case MSG_CMD_DISPLAY_STATUS: {
+        if (msg->u32BodyLen != sizeof(lawrec_display_status_t)) break;
+        lawrec_display_status_t status;
+        memcpy(&status, msg->pBody, sizeof(status));
+        if (status.version != LAWREC_DISPLAY_STATUS_VERSION || status.backend_ready > 1 ||
+            status.preview_enabled > 1 || status.preview_bound > 1 || status.playback_enabled > 1) {
+            printf("IPCMSG: reject display status fields\n");
+            break;
+        }
+        ui_msg_t *event = ui_msg_alloc(sizeof(ui_msg_t) + sizeof(status));
+        if (event) {
+            event->cmd = UI_CMD_DISPLAY_STATUS;
+            memcpy(event->data, &status, sizeof(status));
+            ui_msg_put(event);
+        }
+        break;
+    }
     case MSG_CMD_SIGNUP_RESULT:
         common_msg_proc_helper(UI_CMD_SIGNUP_RESULT, (int8_t *)(msg->pBody));
     break;
@@ -387,11 +418,29 @@ static void msg_recv(int handle, k_ipcmsg_message_t* msg)
         common_msg_proc_helper(UI_CMD_DELETE_RESULT, (int8_t *)(msg->pBody));
     break;
     case MSG_CMD_PREVIEW_ENTER_RESULT:
-    case MSG_CMD_PREVIEW_EXIT_RESULT: {
-        if (msg->u32BodyLen != sizeof(lawrec_preview_wire_t)) break;
+    case MSG_CMD_PREVIEW_EXIT_RESULT:
+    case MSG_CMD_DISPLAY_RECOVER_RESULT: {
+        if (msg->u32BodyLen != sizeof(lawrec_preview_wire_t)) {
+            printf("IPCMSG: reject preview body cmd=%u bytes=%u\n", msg->u32CMD, msg->u32BodyLen);
+            break;
+        }
         lawrec_preview_wire_t wire;
         memcpy(&wire, msg->pBody, sizeof(wire));
-        if (wire.version != LAWREC_PREVIEW_WIRE_VERSION) break;
+        if (wire.version != LAWREC_PREVIEW_WIRE_VERSION) {
+            printf("IPCMSG: reject preview version=%u\n", wire.version);
+            break;
+        }
+        printf("IPCMSG: preview response cmd=%u seq=%u remote_result=%d\n",
+               msg->u32CMD, wire.sequence, wire.result);
+        if (msg->u32CMD == MSG_CMD_DISPLAY_RECOVER_RESULT) {
+            ui_msg_t *event = ui_msg_alloc(sizeof(ui_msg_t));
+            if (event) {
+                event->cmd = UI_CMD_DISPLAY_RECOVER_RESULT; event->result = wire.result;
+                memcpy(event->reserve, &wire.sequence, sizeof(wire.sequence));
+                ui_msg_put(event);
+            }
+            break;
+        }
         int8_t result = wire.result ? -1 : 0;
         common_msg_proc_helper(msg->u32CMD == MSG_CMD_PREVIEW_ENTER_RESULT ?
                               UI_CMD_PREVIEW_ENTER_RESULT : UI_CMD_PREVIEW_EXIT_RESULT,
@@ -434,7 +483,7 @@ static void msg_recv(int handle, k_ipcmsg_message_t* msg)
     }
 }
 
-static void* thread_ipcmsg(void* arg)
+static void* thread_ipcmsg(void*)
 {
     int handle;
     int fd;
@@ -468,8 +517,12 @@ static void* thread_ipcmsg(void* arg)
         }
 
         printf("IPCMSG: connected\n");
-        ipcmsg_handle = handle;
-        ipc_status.store(1);
+        {
+            std::lock_guard<std::mutex> lock(ipc_transport_lock);
+            ipcmsg_handle = handle;
+            ++ipc_generation;
+            ipc_status.store(1);
+        }
 
         {
             char tmp = 0;
@@ -484,13 +537,17 @@ static void* thread_ipcmsg(void* arg)
             msg_send_data(MSG_CMD_RECORD_QUERY, &tmp, 1);
         }
 
-        kd_ipcmsg_run(ipcmsg_handle);
-        ret = kd_ipcmsg_disconnect(handle);
+        kd_ipcmsg_run(handle);
+        {
+            std::lock_guard<std::mutex> lock(ipc_transport_lock);
+            ipcmsg_handle = -1;
+            ipc_status.store(-1);
+            ++ipc_generation;
+            ret = kd_ipcmsg_disconnect(handle);
+        }
         if (ret != 0)
             printf("IPCMSG: disconnect failed: %d\n", ret);
-        ipcmsg_handle = -1;
         printf("IPCMSG: disconnected, retry later\n");
-        ipc_status.store(-1);
         usleep(IPCMSG_CONNECT_RETRY_US);
     }
 
@@ -498,10 +555,10 @@ static void* thread_ipcmsg(void* arg)
 }
 
 
-static int msg_send_data(uint32_t cmd, void *payload, uint32_t payload_len)
+static int msg_send_data(uint32_t cmd, void *payload, uint32_t payload_len,
+                         uint32_t *connection_generation)
 {
     k_ipcmsg_message_t* pReq;
-    int local_ret;
 
     if (cmd == MSG_CMD_PREVIEW_ENTER)
         lawrec_control_note_preview_request(1);
@@ -522,29 +579,21 @@ static int msg_send_data(uint32_t cmd, void *payload, uint32_t payload_len)
         return 0;
     }
 
-    /*
-     * 非 RTSP 命令继续走下面的大核 IPC 通道。
-     * 这里保留本地兜底调用，是为了后续扩展新的“小核本地命令”时继续复用同一接口。
-     */
-    local_ret = lawrec_rtsp_handle_local_cmd(cmd);
-    if (local_ret != 1)
-        return local_ret;
-    local_ret = lawrec_record_handle_local_cmd(cmd);
-    if (local_ret != 1)
-        return local_ret;
-
-    if (ipcmsg_handle < 0) {
+    std::lock_guard<std::mutex> lock(ipc_transport_lock);
+    const int handle = ipcmsg_handle.load();
+    if (connection_generation) *connection_generation = ipc_generation.load();
+    if (handle < 0 || ipc_status.load() != 1 || !kd_ipcmsg_is_connect(handle)) {
         printf("LAWREC-UI: ipc not connected for cmd=%u\n", cmd);
-        return -1;
+        return -ENOTCONN;
     }
 
     pReq = kd_ipcmsg_create_message(0, cmd, payload,
         payload_len);
     if (pReq == NULL) {
         printf("LAWREC-UI: create message failed cmd=%u\n", cmd);
-        return -1;
+        return -ENOMEM;
     }
-    int ret = kd_ipcmsg_send_only(ipcmsg_handle.load(), pReq);
+    int ret = kd_ipcmsg_send_only(handle, pReq);
     kd_ipcmsg_destroy_message(pReq);
     if (ret) printf("IPCMSG: send failed cmd=%u ret=%d\n", cmd, ret);
     return ret;
@@ -605,7 +654,7 @@ static int ui_msg_put(ui_msg_t *pmsg)
 
 static void scr_preview_continue_pending_exit_if_needed(void)
 {
-    if (!scr_preview_is_back_pending())
+    if (!scr_preview_is_back_pending() || pending_preview || ipc_status.load() != 1)
         return;
 
     if (lawrec_control_get_rtsp_state() == LAWREC_RTSP_STATE_STARTING ||
@@ -619,6 +668,63 @@ static void scr_preview_continue_pending_exit_if_needed(void)
 
     scr_preview_set_status("预览关闭中", lv_color_hex(0xffd166));
     msg_send_cmd(MSG_CMD_PREVIEW_EXIT);
+}
+
+/* UI-thread only. Transport failure/timeout cannot certify the big core's state. */
+static void finish_preview_request(uint32_t command, int result)
+{
+    pending_preview = 0;
+    printf("IPCMSG: preview result cmd=%u seq=%u generation=%u result=%d\n",
+           command, preview_sequence, preview_connection_generation, result);
+    if (command == MSG_CMD_DISPLAY_RECOVER) {
+        lawrec_control_finish_display_recovery(result);
+        apply_preview_rtsp_state(); apply_preview_record_state();
+        scr_maintenance_recovery_result(result);
+        return;
+    }
+    if (result == 0)
+        lawrec_control_note_preview_result(command == MSG_CMD_PREVIEW_ENTER);
+    else
+        lawrec_control_note_preview_uncertain();
+    apply_preview_rtsp_state();
+    apply_preview_record_state();
+    if (command == MSG_CMD_PREVIEW_ENTER) {
+        scr_preview_set_status(result == 0 ? "预览已就绪" : "预览启动失败",
+                               lv_color_hex(result == 0 ? 0x4ade80 : 0xff6b6b));
+    } else {
+        scr_main_set_status(result == 0 ? "预览已关闭" : "预览关闭失败",
+                            lv_color_hex(result == 0 ? 0x6fdcff : 0xff6b6b));
+        if (scr_preview_is_back_pending()) {
+            scr_preview_clear_back_pending();
+            if (result == 0) jump_to_scr_main();
+            else scr_preview_set_status("预览关闭失败", lv_color_hex(0xff6b6b));
+        }
+    }
+}
+
+static void poll_display_sync(void)
+{
+    const auto now = std::chrono::steady_clock::now();
+    if (display_query_pending && now >= display_query_deadline) {
+        display_query_pending = false;
+        display_query_retry = now + std::chrono::seconds(5);
+        printf("IPCMSG: display query timeout; state remains unverified\n");
+        scr_main_set_status("IPC sync failed", lv_color_hex(0xff6b6b));
+    }
+    if (ipc_status.load() != 1 || pending_preview || display_query_pending ||
+        display_sync_generation == ipc_generation.load() || now < display_query_retry ||
+        lawrec_playback_active()) return;
+    const int rtsp = lawrec_control_get_rtsp_state(), record = lawrec_control_get_record_state();
+    if (rtsp == LAWREC_RTSP_STATE_STARTING || rtsp == LAWREC_RTSP_STATE_LIVE || rtsp == LAWREC_RTSP_STATE_STOPPING ||
+        record == LAWREC_RECORD_STATE_STARTING || record == LAWREC_RECORD_STATE_RECORDING || record == LAWREC_RECORD_STATE_STOPPING) return;
+    lawrec_preview_wire_t request{LAWREC_PREVIEW_WIRE_VERSION, ++display_query_sequence, 0};
+    int ret = msg_send_data(MSG_CMD_DISPLAY_QUERY, &request, sizeof(request), &display_query_generation);
+    if (ret) display_query_retry = now + std::chrono::seconds(5);
+    else {
+        display_query_pending = true;
+        display_query_deadline = now + std::chrono::seconds(5);
+        scr_main_set_status("IPC syncing", lv_color_hex(0xffd166));
+    }
 }
 
 #ifdef __cplusplus
@@ -694,20 +800,27 @@ int msg_proc_init(void)
 
 int msg_send_cmd(uint32_t cmd)
 {
-    if (cmd == MSG_CMD_PREVIEW_ENTER && lawrec_playback_active()) return -EBUSY;
+    if ((cmd == MSG_CMD_PREVIEW_ENTER || cmd == MSG_CMD_PREVIEW_EXIT) && lawrec_playback_active()) return -EBUSY;
     char tmp = 0;
-    bool preview = cmd == MSG_CMD_PREVIEW_ENTER || cmd == MSG_CMD_PREVIEW_EXIT;
-    if (preview && pending_preview) return -1;
+    bool preview = cmd == MSG_CMD_PREVIEW_ENTER || cmd == MSG_CMD_PREVIEW_EXIT || cmd == MSG_CMD_DISPLAY_RECOVER;
+    if (preview && pending_preview) return -EBUSY;
+    if (cmd == MSG_CMD_DISPLAY_RECOVER) {
+        const int prepare = lawrec_control_prepare_display_recovery();
+        if (prepare) return prepare;
+    }
+    if (preview) {
+        // A user command supersedes the observational startup query.
+        display_query_pending = false;
+        display_sync_generation = ipc_generation.load();
+    }
     lawrec_preview_wire_t wire{LAWREC_PREVIEW_WIRE_VERSION, preview ? ++preview_sequence : 0, 0};
-    int ret = preview ? msg_send_data(cmd, &wire, sizeof(wire)) : msg_send_data(cmd, &tmp, 1);
+    int ret = preview ? msg_send_data(cmd, &wire, sizeof(wire), &preview_connection_generation) : msg_send_data(cmd, &tmp, 1);
     if (preview) {
         if (!ret) {
             pending_preview = cmd;
             preview_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         } else {
-            pending_preview = cmd;
-            int8_t error = -1;
-            common_msg_proc_helper(cmd == MSG_CMD_PREVIEW_ENTER ? UI_CMD_PREVIEW_ENTER_RESULT : UI_CMD_PREVIEW_EXIT_RESULT, &error, preview_sequence);
+            finish_preview_request(cmd, ret);
         }
     }
     return ret;
@@ -724,70 +837,98 @@ int ui_msg_proc(void)
     ui_msg_t *pmsg;
 
     static int last_ipc_status = 0;
+    static uint32_t last_ipc_generation = 0;
     int current_ipc_status = ipc_status.load();
+    const uint32_t current_generation = ipc_generation.load();
+    // A disconnect/reconnect can occur between UI polls and leave status == 1.
+    const bool lost_connection = last_ipc_generation != current_generation && last_ipc_generation != 0;
+    if (lost_connection || (current_ipc_status != 1 && current_ipc_status != last_ipc_status)) {
+        display_query_pending = false;
+        display_sync_generation = UINT32_MAX;
+        display_query_retry = std::chrono::steady_clock::time_point();
+        const bool recovery_cancelled = pending_preview == MSG_CMD_DISPLAY_RECOVER;
+        pending_preview = 0;
+        lawrec_playback_stop();
+        const bool occupied = lawrec_control_preview_needs_close();
+        lawrec_control_note_preview_uncertain();
+        if (recovery_cancelled) scr_maintenance_recovery_result(-ENOTCONN);
+        if (occupied) {
+            scr_preview_set_status("IPC offline", lv_color_hex(0xff6b6b));
+        }
+        scr_preview_clear_back_pending();
+        apply_preview_rtsp_state();
+        apply_preview_record_state();
+    }
+    last_ipc_generation = current_generation;
     if (current_ipc_status != last_ipc_status) {
         last_ipc_status = current_ipc_status;
         scr_main_set_status(current_ipc_status == 1 ? "IPC connected" : "IPC offline",
                             lv_color_hex(current_ipc_status == 1 ? 0x4ade80 : 0xff6b6b));
-        if (current_ipc_status != 1) {
-            lawrec_playback_stop();
-            lawrec_control_note_preview_result(0);
-            apply_preview_rtsp_state();
-            apply_preview_record_state();
-        }
     }
-    if (pending_preview && std::chrono::steady_clock::now() >= preview_deadline) {
-        int8_t error = -1;
+    if (pending_preview && preview_connection_generation != current_generation) {
+        finish_preview_request(pending_preview, -ENOTCONN);
+    } else if (pending_preview && std::chrono::steady_clock::now() >= preview_deadline) {
         printf("IPCMSG: preview timeout cmd=%u\n", pending_preview);
-        common_msg_proc_helper(pending_preview == MSG_CMD_PREVIEW_ENTER ? UI_CMD_PREVIEW_ENTER_RESULT : UI_CMD_PREVIEW_EXIT_RESULT, &error, preview_sequence);
-        preview_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        finish_preview_request(pending_preview, -ETIMEDOUT);
     }
+    poll_display_sync();
     ret = ui_msg_get(&pmsg);
-    if (ret != 0)
+    if (ret != 0) {
+        scr_preview_continue_pending_exit_if_needed();
         return ret;
+    }
 
     /*
      * All asynchronous results, whether they came from big-core IPC or local
      * RTSP control, are serialized through this single UI-thread consumer.
      */
-    if (pmsg->cmd == UI_CMD_PREVIEW_ENTER_RESULT || pmsg->cmd == UI_CMD_PREVIEW_EXIT_RESULT) {
+    if (pmsg->cmd == UI_CMD_PREVIEW_ENTER_RESULT || pmsg->cmd == UI_CMD_PREVIEW_EXIT_RESULT ||
+        pmsg->cmd == UI_CMD_DISPLAY_RECOVER_RESULT) {
         uint32_t seq;
         memcpy(&seq, pmsg->reserve, sizeof(seq));
         bool expected = (pending_preview == MSG_CMD_PREVIEW_ENTER && pmsg->cmd == UI_CMD_PREVIEW_ENTER_RESULT) ||
-                        (pending_preview == MSG_CMD_PREVIEW_EXIT && pmsg->cmd == UI_CMD_PREVIEW_EXIT_RESULT);
+                        (pending_preview == MSG_CMD_PREVIEW_EXIT && pmsg->cmd == UI_CMD_PREVIEW_EXIT_RESULT) ||
+                        (pending_preview == MSG_CMD_DISPLAY_RECOVER && pmsg->cmd == UI_CMD_DISPLAY_RECOVER_RESULT);
         if (!expected || seq != preview_sequence) {
             printf("IPCMSG: ignore stale preview seq=%u\n", seq);
             ui_msg_free(pmsg); return 0;
         }
     }
     switch (pmsg->cmd) {
+    case UI_CMD_DISPLAY_RECOVER_RESULT:
+        finish_preview_request(MSG_CMD_DISPLAY_RECOVER, pmsg->result);
+        break;
+    case UI_CMD_DISPLAY_STATUS: {
+        const auto *status = reinterpret_cast<const lawrec_display_status_t *>(pmsg->data);
+        if (!display_query_pending || status->sequence != display_query_sequence ||
+            display_query_generation != ipc_generation.load() || pending_preview) break;
+        display_query_pending = false;
+        if (status->result || !status->backend_ready) {
+            display_query_retry = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            printf("IPCMSG: display sync deferred ready=%u result=%d\n", status->backend_ready, status->result);
+            break;
+        }
+        display_sync_generation = display_query_generation;
+        lawrec_control_note_display_status(1, status->preview_enabled || status->preview_bound,
+                                          status->playback_enabled);
+        printf("IPCMSG: display synchronized preview=%u bound=%u playback=%u; no capture resumed\n",
+               status->preview_enabled, status->preview_bound, status->playback_enabled);
+        scr_main_set_status(status->playback_enabled ? "回放未关闭" :
+                            status->preview_enabled || status->preview_bound ? "预览未关闭" : "IPC ready",
+                            lv_color_hex(status->playback_enabled || status->preview_enabled || status->preview_bound ? 0xffd166 : 0x4ade80));
+        apply_preview_rtsp_state(); apply_preview_record_state();
+        break;
+    }
     case UI_CMD_SIGNUP_RESULT:
     case UI_CMD_IMPORT_RESULT:
     case UI_CMD_DELETE_RESULT:
         scr_main_display_result(pmsg->result);
     break;
     case UI_CMD_PREVIEW_ENTER_RESULT:
-        pending_preview = 0;
-        lawrec_control_note_preview_result(pmsg->result == 0 ? 1 : 0);
-        apply_preview_rtsp_state();
-        apply_preview_record_state();
-        scr_preview_set_status(pmsg->result == 0 ? "预览已就绪" : "预览启动失败",
-                               pmsg->result == 0 ? lv_color_hex(0x4ade80)
-                                                 : lv_color_hex(0xff6b6b));
+        finish_preview_request(MSG_CMD_PREVIEW_ENTER, pmsg->result);
     break;
     case UI_CMD_PREVIEW_EXIT_RESULT:
-        pending_preview = 0;
-        lawrec_control_note_preview_result(0);
-        apply_preview_rtsp_state();
-        apply_preview_record_state();
-        scr_main_set_status(pmsg->result == 0 ? "预览已关闭" : "预览关闭失败",
-                            pmsg->result == 0 ? lv_color_hex(0x6fdcff)
-                                              : lv_color_hex(0xff6b6b));
-        if (scr_preview_is_back_pending()) {
-            scr_preview_clear_back_pending();
-            if (pmsg->result == 0) jump_to_scr_main();
-            else scr_preview_set_status("预览关闭失败", lv_color_hex(0xff6b6b));
-        }
+        finish_preview_request(MSG_CMD_PREVIEW_EXIT, pmsg->result);
     break;
     case UI_CMD_PING_RESULT:
         scr_main_set_status(pmsg->result == 0 ? "IPC ready" : "IPC error",
@@ -911,6 +1052,7 @@ int ui_msg_proc(void)
     break;
     }
     ui_msg_free(pmsg);
+    scr_preview_continue_pending_exit_if_needed();
 
     return ret;
 }

@@ -1,105 +1,72 @@
-#include "ui_common.h"
-#include "key_proc.h"
+#include "settings_ui.h"
 #include "lawrec_time.h"
-#include "../../rtsp/include/lawrec_rtsp_entry.h"
-#include "../../record/include/lawrec_record_entry.h"
-#include "../../playback/lawrec_playback.h"
-#include <string.h>
+#include "lawrec_control.h"
+#include <errno.h>
 
-static lv_obj_t *screen, *clock_label, *input, *message, *keyboard;
-static lv_group_t *group;
-static int confirming;
-LV_FONT_DECLARE(lawrec_font_cn_20);
-extern void jump_to_scr_settings(void);
+static settings_page page;
+static lv_obj_t *clock_label, *input, *message;
+static char confirmed[32];
 
 static void refresh(lv_timer_t *timer)
 {
     (void)timer;
-    if (lv_scr_act() != screen) return;
-    char utc[32], text[128];
-    int ret = lawrec_time_current_utc(utc, sizeof(utc));
-    snprintf(text, sizeof(text), "System time (UTC)\n%s", ret ? "Read failed" : utc);
-    lv_label_set_text(clock_label, text);
+    if (lv_scr_act()!=page.screen) return;
+    char utc[32];
+    int ret=lawrec_time_current_utc(utc,sizeof(utc));
+    lv_label_set_text(clock_label,ret ? "读取系统时间失败" : utc);
 }
 
-static void edit(lv_event_t *e)
+static void apply(void *data)
 {
-    confirming = 0;
-    if (lv_event_get_code(e) == LV_EVENT_FOCUSED)
-        lv_obj_clear_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
+    (void)data;
+    int ret=lawrec_control_set_time_utc(confirmed);
+    if (ret==-EBUSY) { settings_message(message,"请先停止推流、录像和回放，再校准时间。"); return; }
+    char text[192];
+    if (ret) snprintf(text,sizeof(text),"校准失败：%s",strerror(-ret));
+    else snprintf(text,sizeof(text),"系统时间已更新，RTC 未更新。\n重启可能重置，尚未接入 NTP 自动校时。");
+    settings_message(message,text); refresh(NULL);
 }
 
-static void action(lv_event_t *e)
+static void action(lv_event_t *event)
 {
-    intptr_t cmd = (intptr_t)lv_event_get_user_data(e);
-    if (!cmd) { confirming = 0; jump_to_scr_settings(); return; }
-    int rtsp = lawrec_rtsp_get_state(), record = lawrec_record_get_state();
-    if ((rtsp != LAWREC_RTSP_STATE_IDLE && rtsp != LAWREC_RTSP_STATE_FAILED) ||
-        (record != LAWREC_RECORD_STATE_IDLE && record != LAWREC_RECORD_STATE_FAILED) ||
-        lawrec_playback_active()) {
-        confirming = 0;
-        lv_label_set_text(message, "Stop RTSP, recording and playback\nbefore changing system time.");
+    intptr_t cmd=(intptr_t)lv_event_get_user_data(event);
+    if (!cmd) { jump_to_scr_settings(); return; }
+    if (cmd==2) {
+        char utc[32];
+        if (!lawrec_time_current_utc(utc,sizeof(utc))) lv_textarea_set_text(input,utc);
         return;
     }
     int64_t seconds;
-    const char *text = lv_textarea_get_text(input);
-    int ret = lawrec_time_parse_utc(text, &seconds);
-    if (ret) {
-        confirming = 0;
-        lv_label_set_text(message, "Invalid UTC date/time.\nUse YYYY-MM-DD HH:MM:SS\nYear range: 2020-2099.");
-        return;
+    const char *text=lv_textarea_get_text(input);
+    if (lawrec_time_parse_utc(text,&seconds)) {
+        settings_message(message,"时间格式无效。\n请输入 YYYY-MM-DD HH:MM:SS，年份 2020 到 2099。"); return;
     }
-    if (!confirming) {
-        confirming = 1;
-        lv_label_set_text(message, "Press Apply again to confirm.\nUTC only. Beijing time = UTC+8.\nRTC/NTP persistence not updated.");
-        return;
-    }
-    confirming = 0;
-    ret = lawrec_time_set_utc(text);
-    char result[192];
-    snprintf(result, sizeof(result), ret ? "Set failed: %s" : "System clock updated.\nRTC not updated; reboot may reset it.", ret ? strerror(-ret) : "");
-    lv_label_set_text(message, result);
-    refresh(NULL);
+    snprintf(confirmed,sizeof(confirmed),"%s",text);
+    char prompt[256];
+    snprintf(prompt,sizeof(prompt),"%s UTC\n\n请输入 UTC，不是北京时间。\n北京时间 = UTC + 8 小时。\n仅校准系统时钟，不更新 RTC。",confirmed);
+    settings_confirm(&page,"立即校准系统时间？",prompt,"校准时间",apply,NULL);
 }
 
 void jump_to_scr_time(void)
 {
-    if (!screen) {
-        screen = lv_obj_create(NULL);
-        lv_obj_set_style_bg_color(screen, lv_color_hex(0x0c1b28), 0);
-        clock_label = lv_label_create(screen);
-        lv_obj_set_pos(clock_label, 20, 20);
-        lv_obj_set_style_text_font(clock_label, &lawrec_font_cn_20, 0);
-        lv_obj_set_style_text_color(clock_label, lv_color_hex(0xffffff), 0);
-        input = lv_textarea_create(screen);
-        lv_obj_set_size(input, 420, 64); lv_obj_set_pos(input, 20, 105);
-        lv_textarea_set_one_line(input, true); lv_textarea_set_max_length(input, 19);
-        lv_textarea_set_accepted_chars(input, "0123456789- :");
-        lv_obj_set_style_text_font(input, &lawrec_font_cn_20, 0);
-        message = lv_label_create(screen);
-        lv_obj_set_pos(message, 20, 190); lv_obj_set_width(message, 420);
-        lv_obj_set_style_text_font(message, &lawrec_font_cn_20, 0);
-        lv_obj_set_style_text_color(message, lv_color_hex(0xffffff), 0);
-        lv_obj_t *buttons[2];
-        for (unsigned i = 0; i < 2; ++i) {
-            buttons[i] = lv_btn_create(screen);
-            lv_obj_set_size(buttons[i], 190, 60); lv_obj_set_pos(buttons[i], 20+i*220, 320);
-            lv_obj_add_event_cb(buttons[i], action, LV_EVENT_CLICKED, (void *)(intptr_t)i);
-            lv_obj_t *label = lv_label_create(buttons[i]);
-            lv_obj_set_style_text_font(label, &lawrec_font_cn_20, 0);
-            lv_label_set_text(label, i ? "Apply UTC" : "返回"); lv_obj_center(label);
-        }
-        keyboard = lv_keyboard_create(screen);
-        lv_obj_set_size(keyboard, 460, 300); lv_obj_align(keyboard, LV_ALIGN_BOTTOM_MID, 0, -10);
-        lv_keyboard_set_textarea(keyboard, input);
-        lv_obj_add_event_cb(input, edit, LV_EVENT_VALUE_CHANGED, NULL);
-        lv_obj_add_event_cb(input, edit, LV_EVENT_FOCUSED, NULL);
-        group = lawrec_key_create_group(buttons, 2);
-        lv_timer_create(refresh, 1000, NULL);
+    if (!page.screen) {
+        settings_page_create(&page,"系统时间","仅校准系统 UTC / 不保证重启保时",action);
+        lv_obj_t *card=settings_card(page.body,"当前系统时间（UTC）",NULL);
+        clock_label=settings_label(card,"",0);
+        card=settings_card(page.body,"输入新时间","YYYY-MM-DD HH:MM:SS");
+        input=settings_field(&page,card,"2026-10-02 00:00:00",19,"0123456789- :");
+        settings_button(&page,card,"填入当前时间",0,action,2);
+        card=settings_card(page.body,"时区提示","此处使用 UTC。北京时间需要减去 8 小时。\n例如北京时间 16:30，对应 UTC 08:30。");
+        (void)card;
+        card=settings_card(page.body,"操作提示",NULL);
+        message=settings_label(card,"校准前请停止推流、录像与回放。\n校时不改变录像的单调时钟计时。",1);
+        settings_button(&page,page.footer,"校准系统时间",1,action,1);
+        lv_timer_create(refresh,1000,NULL);
     }
     char utc[32];
-    if (lawrec_time_current_utc(utc, sizeof(utc))) snprintf(utc, sizeof(utc), "2026-01-01 00:00:00");
-    lv_textarea_set_text(input, utc); confirming = 0;
-    lv_label_set_text(message, "Enter UTC, not local time.\nYYYY-MM-DD HH:MM:SS\nApply requires a second press.");
-    lv_scr_load(screen); lawrec_key_set_group(group); refresh(NULL);
+    if (lawrec_time_current_utc(utc,sizeof(utc))) snprintf(utc,sizeof(utc),"2026-01-01 00:00:00");
+    lv_textarea_set_text(input,utc);
+    lv_label_set_text(message,"校准前请停止推流、录像与回放。\n校时不改变录像的单调时钟计时。");
+    lv_obj_scroll_to_y(page.body,0,LV_ANIM_OFF);
+    settings_page_show(&page); refresh(NULL);
 }

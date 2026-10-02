@@ -36,3 +36,9 @@ void lawrec_media_release(int owner)
     owners &= ~(1u << owner);
     fprintf(stderr, "[media] released owner=%d mask=%u\n", owner, owners);
 }
+
+unsigned lawrec_media_owner_mask(void)
+{
+    std::lock_guard<std::mutex> guard(lock);
+    return owners;
+}

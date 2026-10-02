@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lawrec 设置页面实渲染</title>
+<style>
+  :root { color-scheme: dark; --ink: #eff7fa; --muted: #a3becb; --accent: #59d2c4; }
+  * { box-sizing: border-box; }
+  body { margin: 0; color: var(--ink); background: radial-gradient(ellipse at top left, #244956, #091722 65%); font: 18px/1.6 Georgia, "Noto Serif CJK SC", serif; }
+  main { max-width: 1400px; margin: auto; padding: 48px 24px; }
+  h1 { font-size: clamp(28px, 5vw, 48px); margin: 0 0 12px; }
+  h2 { margin-top: 48px; }
+  p { color: var(--muted); max-width: 900px; }
+  .eyebrow { color: var(--accent); letter-spacing: .15em; font-size: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 24px; }
+  figure { margin: 0; }
+  img { width: 100%; height: auto; display: block; border: 1px solid #395869; border-radius: 12px; }
+  a { color: var(--ink); text-decoration: none; }
+  a:focus-visible { outline: 3px solid var(--accent); outline-offset: 5px; }
+  figcaption { margin-top: 12px; }
+  small { color: var(--muted); }
+</style>
+<main>
+  <div class="eyebrow">LAWREC / 480 × 800 / LVGL</div>
+  <h1>设置，按事情来找。</h1>
+  <p>由实际设置页面源码、生产 LVGL 与中文字库渲染，不是网页模拟的设备界面。网络、时间、空间数据为固定测试状态，不代表开发板实测。点击图片查看原尺寸。</p>
+  <h2>页面总览</h2><div class="grid" id="pages"></div>
+  <h2>输入与确认</h2><div class="grid" id="states"></div>
+  <p><small>软件交互检查已覆盖键盘可见性、取消、确认参数快照、未保存草稿保护及保存/在线操作分离。真实触控、网络和媒体链仍需板端验收。</small></p>
+</main>
+<script>
+  const pages = [
+    ["settings", "分类入口"], ["media", "视频与录像"], ["network", "网络连接"],
+    ["media-record-options", "录像选项与长录提示"], ["media-segment-options", "展开分段选择"],
+    ["network-lease-expired", "租约过期提示"], ["network-lease-recovered", "续租后恢复提示"],
+    ["network-reading", "进入页面读取状态"], ["network-saved", "保存结果与连接状态分开"],
+    ["ipv4", "IPv4 / 自动获取"], ["storage", "录像存储"], ["time", "系统时间"],
+    ["maintenance", "设备维护 / 显示恢复"],
+    ["files", "录像文件 / 分页浏览"], ["files-selected", "选中文件详情"],
+    ["playback-playing", "回放 / 中央留给真实视频"]
+  ];
+  const states = [
+    ["media-fps-options", "直接选择帧率"],
+    ["network-hotspots", "选择热点"], ["network-keyboard", "WiFi 键盘"],
+    ["ipv4-static", "静态 IP 编辑"], ["ipv4-keyboard", "数字键盘"],
+    ["time-keyboard", "UTC 专用键盘"], ["media-confirm", "确认媒体配置"],
+    ["network-confirm", "确认连接风险"], ["ipv4-confirm", "确认在线应用"],
+    ["network-discard-confirm", "WiFi 未保存输入保护"], ["ipv4-discard-confirm", "IP 未保存策略保护"],
+    ["storage-checked", "目录检查结果"], ["time-confirm", "确认校时"],
+    ["maintenance-confirm", "确认恢复范围"], ["maintenance-pending", "等待大核确认"],
+    ["maintenance-failed", "恢复失败保护"], ["maintenance-recovered", "显示恢复结果"],
+    ["files-older", "文件下一页"], ["files-delete-confirm", "冻结目标的删除确认"],
+    ["files-changed", "文件变更保护"], ["files-empty", "无已完成录像"],
+    ["files-error", "存储目录异常"], ["files-retained", "媒体资源保留保护"],
+    ["playback-starting", "读取回放文件"], ["playback-paused", "暂停后继续"],
+    ["playback-stopping", "等待停止"], ["playback-finished", "正常结束"],
+    ["playback-failed", "播放失败"], ["playback-retained", "清理失败提示"]
+  ];
+  for (const [id, list] of [["pages", pages], ["states", states]]) {
+    for (const [file, label] of list) {
+      const figure = document.createElement("figure");
+      const link = document.createElement("a"); link.href = `${file}.png`;
+      const img = document.createElement("img");
+      img.src = link.href; img.alt = label; img.width = 480; img.height = 800; img.loading = "lazy";
+      link.append(img);
+      const caption = document.createElement("figcaption"); caption.textContent = label;
+      figure.append(link, caption); document.getElementById(id).append(figure);
+    }
+  }
+</script>
+</html>

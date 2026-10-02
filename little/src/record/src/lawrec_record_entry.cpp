@@ -3,47 +3,31 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
-#include <ctime>
 #include <iostream>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
-
 #include "lawrec_record_entry.h"
+#include "lawrec_mp4_io.h"
 #include "../../common/lawrec_storage.h"
 #include "../../common/lawrec_media.h"
 #include "../../common/lawrec_settings.h"
 #include "../../common/lawrec_frame_queue.h"
 #include "../../common/lawrec_encoder.h"
 #include "../../common/lawrec_audio.h"
-
-extern "C" {
-#include "k_vicap_comm.h"
-#include "mapi_sys_api.h"
-#include "mapi_venc_api.h"
-#include "mp4_format.h"
-void kd_mapi_media_init_workaround(k_bool media_init_flag);
-}
+#include "../../common/lawrec_media_diagnostics.h"
 
 namespace {
 
-static constexpr int kLawrecMapiMediaAlreadyInitialized =
-    static_cast<int>(0xB0008012u);
 #if defined(CONFIG_BOARD_K230_CANMV_LCKFB)
-static constexpr k_vicap_chn kLawrecRecordVicapChn = VICAP_CHN_ID_1;
 static constexpr int kDefaultSensorType = 52;
 #else
-static constexpr k_vicap_chn kLawrecRecordVicapChn = VICAP_CHN_ID_2;
 static constexpr int kDefaultSensorType = 7;
 #endif
-static constexpr int kRecordVencChn = 1;
-static constexpr char kDefaultOutputDir[] = "/tmp/lawrec_records";
-static constexpr char kDefaultPrefix[] = "lawrec";
+static constexpr uint64_t kAudioSampleUs = 125; // G711A mono, 8 kHz.
+static constexpr unsigned kAudioTailWaitMs = 250;
 
 struct RecordRuntime {
     std::mutex lock;
@@ -53,6 +37,7 @@ struct RecordRuntime {
     bool stop_requested{false};
     bool worker_active{false};
     std::chrono::steady_clock::time_point first_frame_time;
+    std::chrono::steady_clock::time_point worker_started;
     uint64_t elapsed_ms{0};
     uint64_t bytes_written{0};
     int last_error{0};
@@ -60,7 +45,8 @@ struct RecordRuntime {
     std::vector<uint8_t> sps, pps;
     uint64_t startup_pts{0};
     uint64_t last_pts{0};
-    int callback_count{0};
+    uint64_t last_pts_us{0}, frame_period_us{0};
+    uint64_t callback_count{0};
     bool got_first_frame{false};
     bool have_sps{false};
     bool have_pps{false};
@@ -74,15 +60,24 @@ struct RecordRuntime {
     KD_HANDLE audio_track{nullptr};
     bool audio_enabled{false};
     uint64_t audio_frames{0}, audio_last_pts_us{0};
-    bool media_reused{false};
+    uint64_t audio_end_pts_us{0};
+    uint64_t audio_source_pts_us{0};
+    bool have_audio_source{false};
     bool sys_initialized{false};
-    bool media_initialized{false};
     k_mp4_codec_id_e codec_id{K_MP4_CODEC_ID_H264};
 };
 
 RecordRuntime g_record;
 LawrecFrameQueue g_record_queue(64, 8*1024*1024);
 LawrecFrameQueue g_record_audio_queue(64, 128*1024);
+
+struct RecordAudioCursor {
+    LawrecFramePtr frame;
+    size_t offset{0};
+    explicit operator bool() const { return bool(frame); }
+    void reset() { frame.reset(); offset = 0; }
+    uint64_t pts_us() const { return frame->pts_us + offset*kAudioSampleUs; }
+};
 
 void record_set_state_locked(lawrec_record_state_e state, int last_error)
 {
@@ -98,11 +93,45 @@ void record_log_state(const char *tag, int last_error, const char *path = nullpt
     std::cout << std::endl;
 }
 
+// Worker-owned muxer inspection, with record.lock held (no I/O or SDK wait).
+void record_log_muxer_locked(const char *phase)
+{
+    if (!g_record.mp4_muxer) return;
+    lawrec_mp4_muxer_stats_t s{};
+    const int ret = lawrec_mp4_muxer_stats(g_record.mp4_muxer, &s);
+    fprintf(stderr, "[lawrec-record] muxer phase=%s segment=%u stats_error=%d tracks=%u samples=%llu capacity=%llu index_bytes=%llu media_bytes=%llu video_frames=%llu audio_packets=%llu\n",
+        phase, g_record.segment_index, ret, s.track_count,
+        (unsigned long long)s.sample_count, (unsigned long long)s.sample_capacity,
+        (unsigned long long)s.sample_index_bytes, (unsigned long long)s.media_bytes,
+        (unsigned long long)g_record.segment_frames, (unsigned long long)g_record.audio_frames);
+}
+
+void record_log_diagnostics(const char *phase)
+{
+    {
+        std::lock_guard<std::mutex> guard(g_record.lock);
+        fprintf(stderr, "[lawrec-record] runtime phase=%s state=%d error=%d stop=%d segments=%u video_frames=%llu written_bytes=%llu elapsed_ms=%llu last_video_pts_us=%llu last_audio_end_us=%llu\n",
+            phase, (int)g_record.state, g_record.last_error, g_record.stop_requested,
+            g_record.segment_index, (unsigned long long)g_record.callback_count,
+            (unsigned long long)g_record.bytes_written, (unsigned long long)g_record.elapsed_ms,
+            (unsigned long long)g_record.last_pts_us, (unsigned long long)g_record.audio_end_pts_us);
+        record_log_muxer_locked(phase);
+    }
+    // /proc collection and queue snapshots never run under the state mutex.
+    lawrec_log_queue_stats("record", phase, "video", g_record_queue);
+    lawrec_log_queue_stats("record", phase, "audio", g_record_audio_queue);
+    lawrec_log_process_stats("record", phase);
+}
+
 void reset_runtime_fields_locked()
 {
     g_record.sps.clear(); g_record.pps.clear();
     g_record.startup_pts = 0;
     g_record.last_pts = 0;
+    g_record.last_pts_us = 0;
+    // Freeze the same process setting used by the shared encoder, not a draft.
+    const unsigned fps = lawrec_settings_frame_rate();
+    g_record.frame_period_us = (1000000u + fps - 1) / fps;
     g_record.callback_count = 0;
     g_record.got_first_frame = false;
     g_record.elapsed_ms = g_record.bytes_written = 0;
@@ -118,56 +147,14 @@ void reset_runtime_fields_locked()
     g_record.audio_enabled = lawrec_settings_audio_enabled() != 0;
     g_record.audio_frames = 0;
     g_record.audio_last_pts_us = 0;
-    g_record.media_reused = false;
+    g_record.audio_end_pts_us = 0;
+    g_record.audio_source_pts_us = 0;
+    g_record.have_audio_source = false;
     g_record.sys_initialized = false;
-    g_record.media_initialized = false;
+    g_record.worker_started = std::chrono::steady_clock::now();
 }
 
-int mkdirs(const char *path)
-{
-    char tmp[256];
-    size_t len;
-
-    if (path == nullptr || path[0] == '\0')
-        return -EINVAL;
-    len = strnlen(path, sizeof(tmp) - 1);
-    if (len == 0 || len >= sizeof(tmp))
-        return -ENAMETOOLONG;
-
-    memcpy(tmp, path, len);
-    tmp[len] = '\0';
-    for (char *p = tmp + 1; *p != '\0'; ++p) {
-        if (*p != '/')
-            continue;
-        *p = '\0';
-        if (mkdir(tmp, 0775) != 0 && errno != EEXIST)
-            return -errno;
-        *p = '/';
-    }
-    if (mkdir(tmp, 0775) != 0 && errno != EEXIST)
-        return -errno;
-    return 0;
-}
-
-std::string build_record_path(const lawrec_record_config_t &config)
-{
-    char ts[32];
-    time_t now;
-    struct tm tm_now;
-    const char *dir = (config.output_dir != nullptr && config.output_dir[0] != '\0')
-                          ? config.output_dir
-                          : kDefaultOutputDir;
-    const char *prefix = (config.file_prefix != nullptr && config.file_prefix[0] != '\0')
-                             ? config.file_prefix
-                             : kDefaultPrefix;
-
-    now = time(nullptr);
-    localtime_r(&now, &tm_now);
-    strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tm_now);
-    return std::string(dir) + "/" + prefix + "_" + ts + ".mp4";
-}
-
-/* Called with record.lock held, or before registering the encoder callback.
+/* Called with record.lock held, or before subscribing to the shared encoder.
  * The encoder stays running across segment rotation; only the muxer changes. */
 int open_segment_locked()
 {
@@ -179,7 +166,7 @@ int open_segment_locked()
     config.config_type = K_MP4_CONFIG_MUXER;
     snprintf(config.muxer_config.file_name, sizeof(config.muxer_config.file_name), "%s", path);
     ret = kd_mp4_create(&g_record.mp4_muxer, &config);
-    if (ret < 0) return ret;
+    if (ret) return ret;
     k_mp4_track_info_s track{};
     track.track_type = K_MP4_STREAM_VIDEO;
     track.time_scale = 1000;
@@ -188,7 +175,7 @@ int open_segment_locked()
     track.video_info.track_id = 1;
     track.video_info.codec_id = g_record.codec_id;
     ret = kd_mp4_create_track(g_record.mp4_muxer, &g_record.video_track, &track);
-    if (ret < 0) return ret;
+    if (ret) return ret;
     g_record.segment_frames = 0;
     g_record.audio_frames = 0;
     g_record.segment_idr_pending = false;
@@ -201,12 +188,16 @@ int close_segment_locked(bool publish)
 {
     int ret = 0;
     if (g_record.mp4_muxer) {
+        record_log_muxer_locked("segment-close");
         int tracks = kd_mp4_destroy_tracks(g_record.mp4_muxer);
         int close = kd_mp4_destroy(g_record.mp4_muxer);
-        if (tracks || close) ret = -EIO;
+        if (tracks || close) {
+            ret = tracks ? (tracks < 0 ? tracks : -EIO) : (close < 0 ? close : -EIO);
+            record_log_state("MP4 finalize failed", ret, g_record.last_path.c_str());
+        }
         g_record.mp4_muxer = g_record.video_track = g_record.audio_track = nullptr;
     }
-    if (g_record.audio_enabled && g_record.segment_frames && !g_record.audio_frames) ret = -ENODATA;
+    if (!ret && g_record.audio_enabled && g_record.segment_frames && !g_record.audio_frames) ret = -ENODATA;
     if (!ret && publish && g_record.segment_frames) {
         char path[128];
         ret = lawrec_storage_publish(g_record.last_path.c_str(), path, sizeof(path));
@@ -218,23 +209,73 @@ int close_segment_locked(bool publish)
     return ret;
 }
 
-// Only the recording worker calls this writer. Drain up to the next video
-// boundary so an IDR rotation never puts future audio into the previous file.
-int record_audio_before(uint64_t boundary_us, LawrecFramePtr &pending,
-                        std::chrono::steady_clock::time_point &progress)
+int end_segment_locked(uint64_t boundary_us)
+{
+    if (!g_record.segment_frames) return 0;
+    if (boundary_us <= g_record.last_pts_us || boundary_us < g_record.segment_pts_us)
+        return -EINVAL;
+    int ret = lawrec_mp4_muxer_end_track(g_record.mp4_muxer, g_record.video_track,
+                                       boundary_us - g_record.segment_pts_us);
+    if (!ret && g_record.audio_track) {
+        if (g_record.audio_end_pts_us <= g_record.segment_pts_us) return -EINVAL;
+        ret = lawrec_mp4_muxer_end_track(g_record.mp4_muxer, g_record.audio_track,
+                                       g_record.audio_end_pts_us - g_record.segment_pts_us);
+    }
+    if (ret) record_log_state("track end metadata failed", ret, g_record.last_path.c_str());
+    return ret;
+}
+
+int record_audio_next(RecordAudioCursor &pending,
+                      std::chrono::steady_clock::time_point &progress, unsigned timeout_ms)
+{
+    int ret = g_record_audio_queue.pop(pending.frame, timeout_ms);
+    if (ret != 1) return ret;
+    pending.offset = 0;
+    progress = std::chrono::steady_clock::now();
+    const auto &frame = *pending.frame;
+    if (frame.bytes.empty() || frame.bytes.size() > 320 ||
+        frame.pts_us > UINT64_MAX - frame.bytes.size()*kAudioSampleUs ||
+        (g_record.have_audio_source && frame.pts_us <= g_record.audio_source_pts_us))
+        return -EINVAL;
+    g_record.audio_source_pts_us = frame.pts_us;
+    g_record.have_audio_source = true;
+    return 1;
+}
+
+// Keep packet ownership and a byte cursor across file rotation. Normal video
+// progress writes only complete packets; clip only at startup/IDR/stop edges.
+int record_audio_before(uint64_t boundary_us, RecordAudioCursor &pending,
+                        std::chrono::steady_clock::time_point &progress,
+                        bool finishing = false, bool clip = false)
 {
     if (!g_record.audio_enabled) return 0;
     for (;;) {
+        int delivery_error = g_record_audio_queue.error();
+        if (delivery_error) return delivery_error;
+        if (!g_record.segment_frames) return 0;
         if (!pending) {
-            int ret = g_record_audio_queue.pop(pending, 0);
-            if (ret <= 0) return ret;
-            progress = std::chrono::steady_clock::now();
+            int ret = record_audio_next(pending, progress, 0);
+            if (ret <= 0) return finishing && ret == -ECANCELED ? 0 : ret;
         }
-        if (pending->pts_us >= boundary_us) return 0;
         std::lock_guard<std::mutex> guard(g_record.lock);
-        if (g_record.stop_requested) return 0;
-        if (g_record.segment_frames && pending->pts_us >= g_record.segment_pts_us) {
-            if (g_record.audio_frames && pending->pts_us < g_record.audio_last_pts_us) return -EINVAL;
+        if (g_record.last_error) return g_record.last_error;
+        if (g_record.stop_requested && !finishing) return 0;
+        const auto &packet = *pending.frame;
+        if (pending.pts_us() < g_record.segment_pts_us) {
+            uint64_t delta = g_record.segment_pts_us - packet.pts_us;
+            uint64_t skip = delta/kAudioSampleUs + (delta%kAudioSampleUs != 0);
+            pending.offset = skip > packet.bytes.size() ? packet.bytes.size() : skip;
+        }
+        if (pending.offset == packet.bytes.size()) { pending.reset(); continue; }
+        if (pending.pts_us() >= boundary_us) return 0;
+        size_t end = packet.bytes.size();
+        if (packet.pts_us + end*kAudioSampleUs > boundary_us) {
+            if (!clip) return 0;
+            uint64_t delta = boundary_us - packet.pts_us;
+            end = delta/kAudioSampleUs + (delta%kAudioSampleUs != 0);
+        }
+        if (end > pending.offset) {
+            if (g_record.audio_frames && pending.pts_us() <= g_record.audio_last_pts_us) return -EINVAL;
             if (!g_record.audio_track) {
                 // Creating audio before the first video write triggers the SDK's
                 // hardcoded G711U track path. Add our G711A track afterwards.
@@ -251,42 +292,71 @@ int record_audio_before(uint64_t boundary_us, LawrecFramePtr &pending,
             }
             k_mp4_frame_data_s frame{};
             frame.codec_id = K_MP4_CODEC_ID_G711A;
-            frame.data = const_cast<uint8_t *>(pending->bytes.data());
-            frame.data_length = pending->bytes.size();
-            frame.time_stamp = pending->pts_us - g_record.segment_pts_us;
-            if (kd_mp4_write_frame(g_record.mp4_muxer, g_record.audio_track, &frame)) return -EIO;
+            frame.data = const_cast<uint8_t *>(packet.bytes.data() + pending.offset);
+            frame.data_length = end - pending.offset;
+            frame.time_stamp = pending.pts_us() - g_record.segment_pts_us;
+            int ret = kd_mp4_write_frame(g_record.mp4_muxer, g_record.audio_track, &frame);
+            if (ret) return ret < 0 ? ret : -EIO;
             g_record.bytes_written += frame.data_length;
-            g_record.audio_last_pts_us = pending->pts_us;
+            g_record.audio_last_pts_us = pending.pts_us();
+            g_record.audio_end_pts_us = packet.pts_us + end*kAudioSampleUs;
             ++g_record.audio_frames;
         }
+        pending.offset = end;
+        if (end < packet.bytes.size()) return 0;
         pending.reset();
     }
 }
 
-int record_video_callback_impl(k_u32 chn_num, kd_venc_data_s *data, k_u8 *private_data)
+/* Wait only for audio covering the last accepted video frame, never for a
+ * growing queue to become empty. SDK stop/unregister and queue waits must not
+ * hold record.lock. A partially written packet keeps its remainder for the
+ * next segment; sample start times choose sides with <125-us quantization. */
+int record_audio_tail(uint64_t boundary_us, RecordAudioCursor &pending,
+                      std::chrono::steady_clock::time_point &progress,
+                      const char *phase = "stop")
 {
-    k_mp4_frame_data_s frame_data;
-    int cut;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(kAudioTailWaitMs);
+    for (;;) {
+        int ret = record_audio_before(boundary_us, pending, progress, true, true);
+        if (ret) return ret;
+        {
+            std::lock_guard<std::mutex> guard(g_record.lock);
+            if (g_record.audio_end_pts_us >= boundary_us ||
+                (pending && pending.pts_us() >= boundary_us)) {
+                fprintf(stderr, "[lawrec-record] audio boundary phase=%s segment=%u boundary_us=%llu end_us=%llu packets=%llu\n",
+                    phase, g_record.segment_index,
+                    static_cast<unsigned long long>(boundary_us),
+                    static_cast<unsigned long long>(g_record.audio_end_pts_us),
+                    static_cast<unsigned long long>(g_record.audio_frames));
+                return g_record.audio_end_pts_us >= boundary_us ? 0 : -ENODATA;
+            }
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            fprintf(stderr, "[lawrec-record] audio deadline phase=%s boundary_us=%llu end_us=%llu error=%d\n",
+                phase, static_cast<unsigned long long>(boundary_us),
+                static_cast<unsigned long long>(g_record.audio_end_pts_us), -ETIMEDOUT);
+            return -ETIMEDOUT;
+        }
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count();
+        ret = record_audio_next(pending, progress, remaining > 20 ? 20 : remaining > 0 ? remaining : 1);
+        if (ret < 0) return ret;
+    }
+}
 
-    (void)chn_num;
-    (void)private_data;
-    if (data == nullptr)
+int record_video_frame_impl(const LawrecFramePtr &encoded, RecordAudioCursor &pending,
+                            std::chrono::steady_clock::time_point &audio_progress)
+{
+    if (!encoded || encoded->bytes.empty() || encoded->bytes.size() > 2*1024*1024)
         return -EINVAL;
 
-    std::lock_guard<std::mutex> guard(g_record.lock);
+    std::unique_lock<std::mutex> guard(g_record.lock);
     if (g_record.mp4_muxer == nullptr || g_record.video_track == nullptr || g_record.stop_requested)
         return 0;
 
-    cut = static_cast<int>(data->status.cur_packs);
-    if (cut <= 0 || cut > KD_VENC_MAX_FRAME_PACKCOUNT) return -EINVAL;
-    std::vector<uint8_t> frame;
-    for (int i = 0; i < cut; ++i) {
-        auto &pack = data->astPack[i];
-        if (!pack.vir_addr || !pack.len || pack.len > 4 * 1024 * 1024 ||
-            frame.size() + pack.len > 4 * 1024 * 1024) return -EINVAL;
-        const auto *p = reinterpret_cast<const uint8_t *>(pack.vir_addr);
-        frame.insert(frame.end(), p, p + pack.len);
-    }
+    const auto &frame = encoded->bytes;
     bool key = false, vcl = false;
     bool frame_sps = false, frame_pps = false;
     for (size_t i = 0; i + 3 < frame.size();) {
@@ -317,15 +387,34 @@ int record_video_callback_impl(k_u32 chn_num, kd_venc_data_s *data, k_u8 *privat
         i = end;
     }
     if (!vcl) return 0;
-    uint64_t pts = data->astPack[0].pts / 1000;
-    if (pts < g_record.startup_pts || (g_record.got_first_frame && pts < g_record.last_pts)) {
+    uint64_t pts = encoded->pts_us / 1000;
+    if (pts < g_record.startup_pts ||
+        (g_record.got_first_frame && encoded->pts_us <= g_record.last_pts_us)) {
         g_record.last_error = -EINVAL;
         g_record.stop_requested = true;
         return -EINVAL;
     }
-    if (g_record.got_first_frame && g_record.segment_frames && key &&
-        g_record.segment_seconds && pts-g_record.segment_pts >= uint64_t(g_record.segment_seconds)*1000) {
-        int ret = close_segment_locked(true);
+    if (!g_record.segment_frames && (!key || !g_record.have_sps || !g_record.have_pps)) return 0;
+    const bool rotate = g_record.got_first_frame && g_record.segment_frames && key &&
+        g_record.segment_seconds && encoded->pts_us-g_record.segment_pts_us >=
+        uint64_t(g_record.segment_seconds)*1000000;
+    // This validated video frame is now in flight. Complete it even if stop
+    // arrives while audio catches up, rather than mux audio beyond an unwritten
+    // video boundary. The worker admits no further frame once stop is requested.
+    guard.unlock();
+    int audio_ret = rotate ? (g_record.audio_enabled ? record_audio_tail(encoded->pts_us, pending, audio_progress, "segment") : 0) :
+                            record_audio_before(encoded->pts_us, pending, audio_progress, true);
+    guard.lock();
+    if (audio_ret) {
+        if (!g_record.last_error) g_record.last_error = audio_ret;
+        g_record.stop_requested = true;
+        g_record.state = LAWREC_RECORD_STATE_STOPPING;
+        record_log_state(rotate ? "segment audio boundary failed" : "audio write/queue failed", audio_ret);
+        return audio_ret;
+    }
+    if (rotate) {
+        int ret = end_segment_locked(encoded->pts_us);
+        if (!ret) ret = close_segment_locked(true);
         if (!ret) ret = open_segment_locked();
         if (ret) {
             g_record.last_error = ret; g_record.stop_requested = true;
@@ -334,53 +423,65 @@ int record_video_callback_impl(k_u32 chn_num, kd_venc_data_s *data, k_u8 *privat
             return ret;
         }
     }
+    std::vector<uint8_t> headed;
     if (!g_record.segment_frames) {
-        if (!key || !g_record.have_sps || !g_record.have_pps) return 0;
-        std::vector<uint8_t> headers;
-        if (!frame_sps) headers.insert(headers.end(), g_record.sps.begin(), g_record.sps.end());
-        if (!frame_pps) headers.insert(headers.end(), g_record.pps.begin(), g_record.pps.end());
-        if (frame.size()+headers.size() > 4*1024*1024) {
+        const size_t header_size = (frame_sps ? 0 : g_record.sps.size()) +
+                                   (frame_pps ? 0 : g_record.pps.size());
+        if (frame.size()+header_size > 2*1024*1024) {
             g_record.last_error = -EOVERFLOW; g_record.stop_requested = true;
             return -EOVERFLOW;
         }
-        frame.insert(frame.begin(), headers.begin(), headers.end());
+        if (header_size) {
+            headed.reserve(header_size + frame.size());
+            if (!frame_sps) headed.insert(headed.end(), g_record.sps.begin(), g_record.sps.end());
+            if (!frame_pps) headed.insert(headed.end(), g_record.pps.begin(), g_record.pps.end());
+            headed.insert(headed.end(), frame.begin(), frame.end());
+        }
         g_record.segment_pts = pts;
-        g_record.segment_pts_us = data->astPack[0].pts;
+        g_record.segment_pts_us = encoded->pts_us;
         if (!g_record.got_first_frame) g_record.startup_pts = pts;
     }
-    memset(&frame_data, 0, sizeof(frame_data));
+    const auto &payload = headed.empty() ? frame : headed;
+    k_mp4_frame_data_s frame_data{};
     frame_data.codec_id = g_record.codec_id;
-    frame_data.data = frame.data();
-    frame_data.data_length = frame.size();
+    frame_data.data = const_cast<uint8_t *>(payload.data());
+    frame_data.data_length = payload.size();
     // SDK mp4_format converts microseconds to milliseconds internally.
     // Keep exact capture PTS here; the millisecond fields above are UI/rotation state.
-    if (data->astPack[0].pts < g_record.segment_pts_us) return -EINVAL;
-    frame_data.time_stamp = data->astPack[0].pts - g_record.segment_pts_us;
-    if (kd_mp4_write_frame(g_record.mp4_muxer, g_record.video_track, &frame_data) < 0) {
-        g_record.last_error = -EIO;
+    if (encoded->pts_us < g_record.segment_pts_us) return -EINVAL;
+    frame_data.time_stamp = encoded->pts_us - g_record.segment_pts_us;
+    int write_ret = kd_mp4_write_frame(g_record.mp4_muxer, g_record.video_track, &frame_data);
+    if (write_ret) {
+        g_record.last_error = write_ret < 0 ? write_ret : -EIO;
         g_record.stop_requested = true;
         g_record.state = LAWREC_RECORD_STATE_STOPPING;
-        record_log_state("write failed", -EIO);
-        return -EIO;
+        record_log_state("video write failed", g_record.last_error, g_record.last_path.c_str());
+        return g_record.last_error;
     }
     if (!g_record.got_first_frame) {
         g_record.got_first_frame = true;
         g_record.first_frame_time = std::chrono::steady_clock::now();
-        g_record.state = LAWREC_RECORD_STATE_RECORDING;
-        record_log_state("first IDR written state=recording", 0);
+        if (!g_record.stop_requested) g_record.state = LAWREC_RECORD_STATE_RECORDING;
+        record_log_state(g_record.stop_requested ? "first IDR written state=stopping" : "first IDR written state=recording", 0);
+        fprintf(stderr, "[lawrec-record] first_frame_latency_ms=%lld capture_pts_us=%llu\n",
+            (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                g_record.first_frame_time - g_record.worker_started).count(),
+            (unsigned long long)encoded->pts_us);
     }
-    g_record.bytes_written += frame.size();
+    g_record.bytes_written += payload.size();
     ++g_record.segment_frames;
     g_record.last_pts = pts;
+    g_record.last_pts_us = encoded->pts_us;
     ++g_record.callback_count;
     g_record.elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - g_record.first_frame_time).count();
     return 0;
 }
 
-int record_video_callback(k_u32 chn_num, kd_venc_data_s *data, k_u8 *private_data)
+int record_video_frame(const LawrecFramePtr &frame, RecordAudioCursor &pending,
+                       std::chrono::steady_clock::time_point &audio_progress)
 {
-    try { return record_video_callback_impl(chn_num, data, private_data); }
+    try { return record_video_frame_impl(frame, pending, audio_progress); }
     catch (...) {
         std::lock_guard<std::mutex> guard(g_record.lock);
         g_record.last_error = -ENOMEM;
@@ -398,24 +499,62 @@ int init_record_media(const lawrec_record_config_t &config)
     return ret;
 }
 
-void cleanup_record_runtime()
+void cleanup_record_runtime(RecordAudioCursor *pending_audio = nullptr,
+                            std::chrono::steady_clock::time_point *audio_progress = nullptr)
 {
-    { std::lock_guard<std::mutex> guard(g_record.lock); g_record.stop_requested = true; }
+    uint64_t video_boundary = 0, audio_boundary = 0;
+    {
+        std::lock_guard<std::mutex> guard(g_record.lock);
+        g_record.stop_requested = true;
+        if (g_record.got_first_frame && !g_record.last_error) {
+            if (g_record.last_pts_us > UINT64_MAX - g_record.frame_period_us)
+                g_record.last_error = -EOVERFLOW;
+            else video_boundary = g_record.last_pts_us + g_record.frame_period_us;
+        }
+        if (pending_audio && audio_progress && g_record.audio_enabled)
+            audio_boundary = video_boundary;
+    }
     g_record_queue.close();
-    g_record_audio_queue.close();
     int cleanup_error = 0;
     auto check = [&](const char *operation, int ret) {
-        if (ret) { cleanup_error = ret; fprintf(stderr, "[record] %s failed=%d; restart required\n", operation, ret); }
+        if (ret) {
+            if (!cleanup_error) cleanup_error = ret;
+            fprintf(stderr, "[record] %s failed=%d; restart required\n", operation, ret);
+        }
     };
 
     if (g_record.sys_initialized)
         check("encoder unsubscribe", lawrec_encoder_unsubscribe(2));
-    if (g_record.sys_initialized && g_record.audio_enabled)
-        check("audio unsubscribe", lawrec_audio_unsubscribe(2));
+    if (audio_boundary && !cleanup_error) {
+        int ret = record_audio_tail(audio_boundary, *pending_audio, *audio_progress);
+        if (ret) {
+            std::lock_guard<std::mutex> guard(g_record.lock);
+            if (!g_record.last_error) g_record.last_error = ret;
+            record_log_state("audio tail failed", ret);
+        }
+    }
+    if (g_record.sys_initialized && g_record.audio_enabled) {
+        check("audio unsubscribe", lawrec_audio_unsubscribe(2, audio_boundary && !cleanup_error));
+        // Detachment seals delivery under the callback mutex, before SDK stop.
+        // Preserve any already accepted packet until the final bounded drain.
+        if (audio_boundary && !cleanup_error) {
+            int ret = record_audio_before(audio_boundary, *pending_audio, *audio_progress, true, true);
+            if (ret) {
+                std::lock_guard<std::mutex> guard(g_record.lock);
+                if (!g_record.last_error) g_record.last_error = ret;
+            }
+        }
+    }
+    g_record_audio_queue.close();
     {
         std::lock_guard<std::mutex> guard(g_record.lock);
-        if (cleanup_error) g_record.last_error = cleanup_error;
-        if (close_segment_locked(false)) g_record.last_error = -EIO;
+        if (cleanup_error && !g_record.last_error) g_record.last_error = cleanup_error;
+        if (video_boundary && !g_record.last_error) {
+            int ret = end_segment_locked(video_boundary);
+            if (ret) g_record.last_error = ret;
+        }
+        int close_ret = close_segment_locked(false);
+        if (close_ret && !g_record.last_error) g_record.last_error = close_ret;
     }
     if (g_record.sys_initialized && !cleanup_error)
         lawrec_media_release(2);
@@ -427,8 +566,9 @@ void record_worker(lawrec_record_config_t config)
     int ret;
     auto last_progress = std::chrono::steady_clock::now();
     auto last_storage_check = last_progress;
-    int last_count = 0;
-    LawrecFramePtr pending_audio;
+    auto last_diagnostics = last_progress;
+    uint64_t last_count = 0;
+    RecordAudioCursor pending_audio;
     auto audio_progress = last_progress;
 
     signal(SIGPIPE, SIG_IGN);
@@ -436,25 +576,26 @@ void record_worker(lawrec_record_config_t config)
     {
         std::lock_guard<std::mutex> guard(g_record.lock);
         g_record.config = config;
-        g_record.codec_id = (config.video_type != nullptr &&
-                             strcmp(config.video_type, "h265") == 0)
-                                ? K_MP4_CODEC_ID_H265
-                                : K_MP4_CODEC_ID_H264;
-        g_record.last_path = build_record_path(config);
+        g_record.codec_id = K_MP4_CODEC_ID_H264;
+        // Storage owns naming and the frozen directory; never dereference caller strings here.
+        g_record.last_path.clear();
         g_record.last_error = 0;
         reset_runtime_fields_locked();
     }
+    g_record_queue.reset();
+    g_record_audio_queue.reset();
+    record_log_diagnostics("start");
 
     ret = init_record_media(config);
-    if (ret != K_SUCCESS)
+    if (ret)
         goto fail;
 
     ret = open_segment_locked();
-    if (ret < 0)
+    if (ret)
         goto fail;
 
     ret = lawrec_encoder_subscribe(2, &g_record_queue);
-    if (ret != K_SUCCESS)
+    if (ret)
         goto fail;
     if (g_record.audio_enabled) {
         ret = lawrec_audio_subscribe(2, &g_record_audio_queue);
@@ -473,19 +614,7 @@ void record_worker(lawrec_record_config_t config)
         LawrecFramePtr frame;
         int queued = g_record_queue.pop(frame, 20);
         if (queued == 1) {
-            int audio_ret = record_audio_before(frame->pts_us, pending_audio, audio_progress);
-            if (audio_ret) {
-                std::lock_guard<std::mutex> guard(g_record.lock);
-                g_record.last_error = audio_ret;
-                g_record.stop_requested = true;
-                record_log_state("audio write/queue failed", audio_ret);
-            }
-            kd_venc_data_s data{};
-            data.status.cur_packs = 1;
-            data.astPack[0].vir_addr = reinterpret_cast<k_char *>(const_cast<uint8_t *>(frame->bytes.data()));
-            data.astPack[0].len = frame->bytes.size();
-            data.astPack[0].pts = frame->pts_us;
-            int write_ret = record_video_callback(kRecordVencChn, &data, nullptr);
+            int write_ret = record_video_frame(frame, pending_audio, audio_progress);
             if (write_ret) {
                 std::lock_guard<std::mutex> guard(g_record.lock);
                 g_record.last_error = write_ret;
@@ -500,6 +629,13 @@ void record_worker(lawrec_record_config_t config)
         bool request_idr = false;
         {
             std::lock_guard<std::mutex> guard(g_record.lock);
+            int audio_error = g_record.audio_enabled ? g_record_audio_queue.error() : 0;
+            if (audio_error && !g_record.last_error) {
+                g_record.last_error = audio_error;
+                g_record.stop_requested = true;
+                g_record.state = LAWREC_RECORD_STATE_STOPPING;
+                record_log_state("audio delivery failed", audio_error);
+            }
             if (g_record.stop_requested) break;
             auto now = std::chrono::steady_clock::now();
             if (g_record.callback_count != last_count && g_record.got_first_frame) {
@@ -508,7 +644,9 @@ void record_worker(lawrec_record_config_t config)
             }
             int storage_ret = 0;
             if (now-last_storage_check >= std::chrono::milliseconds(100)) {
-                storage_ret = lawrec_storage_check(nullptr);
+                storage_ret = lawrec_mp4_muxer_flush(g_record.mp4_muxer);
+                if (storage_ret) record_log_state("MP4 flush failed", storage_ret, g_record.last_path.c_str());
+                else storage_ret = lawrec_storage_check(nullptr);
                 last_storage_check = now;
             }
             if (storage_ret || now - last_progress > std::chrono::seconds(8) ||
@@ -542,9 +680,14 @@ void record_worker(lawrec_record_config_t config)
                 g_record.state = LAWREC_RECORD_STATE_STOPPING;
             }
         }
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_diagnostics >= std::chrono::seconds(10)) {
+            record_log_diagnostics("running");
+            last_diagnostics = now;
+        }
     }
 
-    cleanup_record_runtime();
+    cleanup_record_runtime(&pending_audio, &audio_progress);
     {
         std::lock_guard<std::mutex> guard(g_record.lock);
         char final_path[128];
@@ -561,16 +704,22 @@ void record_worker(lawrec_record_config_t config)
     }
     record_log_state(g_record.last_error == 0 ? "state=idle" : "state=failed",
                      g_record.last_error, g_record.last_path.c_str());
+    record_log_diagnostics("stopped");
     return;
 
 fail:
+    {
+        std::lock_guard<std::mutex> guard(g_record.lock);
+        if (!g_record.last_error) g_record.last_error = ret < 0 ? ret : -EIO;
+    }
     cleanup_record_runtime();
     {
         std::lock_guard<std::mutex> guard(g_record.lock);
         g_record.stop_requested = false;
-        record_set_state_locked(LAWREC_RECORD_STATE_FAILED, ret);
+        record_set_state_locked(LAWREC_RECORD_STATE_FAILED, g_record.last_error);
     }
-    record_log_state("state=failed", ret, g_record.last_path.c_str());
+    record_log_state("state=failed", g_record.last_error, g_record.last_path.c_str());
+    record_log_diagnostics("startup-failed");
 }
 
 }  // namespace
@@ -601,16 +750,12 @@ extern "C" int lawrec_record_start_async(const lawrec_record_config_t *config)
         local_config = *config;
         if (local_config.sensor_type <= 0)
             local_config.sensor_type = kDefaultSensorType;
-        if (local_config.video_type == nullptr)
-            local_config.video_type = "h264";
+        local_config.video_type = "h264";
         if (local_config.video_width <= 0)
             local_config.video_width = 1280;
         if (local_config.video_height <= 0)
             local_config.video_height = 720;
-        if (local_config.output_dir == nullptr)
-            local_config.output_dir = kDefaultOutputDir;
-        if (local_config.file_prefix == nullptr)
-            local_config.file_prefix = kDefaultPrefix;
+        local_config.output_dir = local_config.file_prefix = nullptr;
 
         g_record.stop_requested = false;
         record_set_state_locked(LAWREC_RECORD_STATE_STARTING, 0);

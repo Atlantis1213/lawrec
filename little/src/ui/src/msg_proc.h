@@ -51,12 +51,14 @@ typedef enum {
     UI_CMD_RECORD_START_RESULT,
     UI_CMD_RECORD_STOP_RESULT,
     UI_CMD_RECORD_STATUS,
+    UI_CMD_DISPLAY_STATUS,
+    UI_CMD_DISPLAY_RECOVER_RESULT,
 } ui_cmd_e;
 
 typedef struct {
     uint8_t cmd;
-    int8_t result;
-    uint8_t reserve[6];
+    int32_t result;
+    uint8_t reserve[8];
     uint8_t data[0];
 } ui_msg_t;
 

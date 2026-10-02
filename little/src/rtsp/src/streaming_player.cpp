@@ -7,6 +7,7 @@
 #include "lawrec_encoder.h"
 #include "lawrec_audio.h"
 #include "lawrec_media_clock.h"
+#include "lawrec_media_diagnostics.h"
 #include "../../common/lawrec_media.h"
 #include "../../common/lawrec_config.h"
 
@@ -83,6 +84,7 @@ StreamingPlayer::StreamingPlayer(const k_vicap_sensor_type &sensor_type,
         g_video_cb_count[i].store(0);
     g_audio_cb_count.store(0);
 
+    try {
     std::cout << "[lawrec-rtsp] ctor begin" << std::endl;
     std::cout << "[lawrec-rtsp] create scheduler" << std::endl;
     scheduler_ = BasicTaskScheduler::createNew();
@@ -136,46 +138,56 @@ StreamingPlayer::StreamingPlayer(const k_vicap_sensor_type &sensor_type,
     init_ok_ = true;
     init_ret_ = K_SUCCESS;
     std::cout << "[lawrec-rtsp] ctor ready" << std::endl;
+    } catch (...) {
+        DeInit();
+        throw;
+    }
 }
 
 static k_s32 sessionVideoCallback(k_u32 chn_num, kd_venc_data_s* p_vstream_data, k_u8 *p_private_data) try {
     if (!p_vstream_data || !p_vstream_data->status.cur_packs ||
-        p_vstream_data->status.cur_packs > KD_VENC_MAX_FRAME_PACKCOUNT) return -1;
+        p_vstream_data->status.cur_packs > KD_VENC_MAX_FRAME_PACKCOUNT) return -EINVAL;
     if (g_rtsp_stopping.load() || chn_num >= MAX_SESSION_NUM ||
         session_info[chn_num].sessionVideoLiveSource == nullptr) {
         return 0;
     }
     for (unsigned i = 0; i < p_vstream_data->status.cur_packs; ++i)
-        if (!p_vstream_data->astPack[i].vir_addr || !p_vstream_data->astPack[i].len) return -1;
-    unsigned long cb_count = ++g_video_cb_count[chn_num];
-    if (cb_count <= 3 || (cb_count % 120) == 0) {
-        printf("[lawrec-rtsp] video cb chn=%u count=%lu packs=%u pts=%llu len0=%u\n",
-               chn_num, cb_count, p_vstream_data->status.cur_packs,
-               (unsigned long long)p_vstream_data->astPack[0].pts,
-               p_vstream_data->astPack[0].len);
-    }
+        if (!p_vstream_data->astPack[i].vir_addr || !p_vstream_data->astPack[i].len) return -EINVAL;
     int cut = p_vstream_data->status.cur_packs;
     for (int i = 0; i < cut; i++) {
         k_char *pdata = p_vstream_data->astPack[i].vir_addr;
         uint64_t timestamp = presentation_time(p_vstream_data->astPack[i].pts);
         if (session_info[chn_num].sessionVideoType == kVideoTypeH264) {
             H264LiveFrameSource *h264LiveSource = (H264LiveFrameSource*)session_info[chn_num].sessionVideoLiveSource;
-            h264LiveSource->pushData((const uint8_t*)pdata, p_vstream_data->astPack[i].len, timestamp);
+            int ret = h264LiveSource->pushData((const uint8_t*)pdata, p_vstream_data->astPack[i].len, timestamp);
+            if (ret) return ret;
         } else if (session_info[chn_num].sessionVideoType == kVideoTypeH265) {
             H265LiveFrameSource *h265LiveSource = (H265LiveFrameSource*)session_info[chn_num].sessionVideoLiveSource;
-            h265LiveSource->pushData((const uint8_t*)pdata, p_vstream_data->astPack[i].len, timestamp);
+            int ret = h265LiveSource->pushData((const uint8_t*)pdata, p_vstream_data->astPack[i].len, timestamp);
+            if (ret) return ret;
         } else if (session_info[chn_num].sessionVideoType == kVideoTypeMjpeg) {
             MjpegLiveVideoSource *mjpegLiveSource = (MjpegLiveVideoSource*)session_info[chn_num].sessionVideoLiveSource;
             mjpegLiveSource->pushData((const uint8_t*)pdata, p_vstream_data->astPack[i].len, timestamp);
         }
     }
+    unsigned long cb_count = ++g_video_cb_count[chn_num];
+    if (cb_count <= 3)
+        printf("[lawrec-rtsp] video accepted chn=%u count=%lu packs=%u pts=%llu len0=%u\n",
+               chn_num, cb_count, p_vstream_data->status.cur_packs,
+               (unsigned long long)p_vstream_data->astPack[0].pts,
+               p_vstream_data->astPack[0].len);
     return 0;
 }
 
-catch (...) {
+catch (const std::bad_alloc &) {
     g_rtsp_stopping.store(true);
     fprintf(stderr, "[rtsp] video callback allocation failure\n");
-    return -1;
+    return -ENOMEM;
+}
+catch (...) {
+    g_rtsp_stopping.store(true);
+    fprintf(stderr, "[rtsp] video presentation timestamp failure\n");
+    return -ERANGE;
 }
 
 static k_s32 sessionAudioCallback(k_u32 chn_num, k_audio_stream* stream_data, void* p_private_data) try {
@@ -183,23 +195,28 @@ static k_s32 sessionAudioCallback(k_u32 chn_num, k_audio_stream* stream_data, vo
         return 0;
     if (!stream_data || !stream_data->stream || !stream_data->len || stream_data->len > 65536) {
         fprintf(stderr, "[lawrec-rtsp] invalid audio callback payload\n");
-        return -1;
+        return -EINVAL;
     }
+    int ret = audio_session.g711LiveSource->pushData((const uint8_t*)stream_data->stream, stream_data->len,
+                                                   presentation_time(stream_data->time_stamp));
+    if (ret) return ret;
     unsigned long cb_count = ++g_audio_cb_count;
-    if (cb_count <= 3 || (cb_count % 200) == 0) {
+    if (cb_count <= 3) {
         printf("[lawrec-rtsp] audio cb count=%lu len=%u ts=%llu\n",
                cb_count, stream_data->len,
                (unsigned long long)stream_data->time_stamp);
     }
-    audio_session.g711LiveSource->pushData((const uint8_t*)stream_data->stream, stream_data->len,
-                                         presentation_time(stream_data->time_stamp));
-
     return 0;
+}
+catch (const std::bad_alloc &) {
+    g_rtsp_stopping.store(true);
+    fprintf(stderr, "[lawrec-rtsp] audio callback allocation failure\n");
+    return -ENOMEM;
 }
 catch (...) {
     g_rtsp_stopping.store(true);
-    fprintf(stderr, "[lawrec-rtsp] audio callback allocation failure\n");
-    return -1;
+    fprintf(stderr, "[rtsp] audio presentation timestamp failure\n");
+    return -ERANGE;
 }
 
 int StreamingPlayer::StreamingPlayerInit() {
@@ -222,13 +239,20 @@ int StreamingPlayer::Start() {
     g_rtsp_stopping.store(false);
     watchVariable_ = 0;
     g_presentation_clock.reset();
+    LogDiagnostics("start");
     video_error_.store(0);
     int ret = lawrec_encoder_subscribe(1, &video_queue_);
     if (ret) return ret;
     // Owned frames decouple live555 from the SDK callback and MP4 writer.
     video_worker_ = std::thread([this]() {
+        auto last_diagnostics = std::chrono::steady_clock::now();
         try {
             while (!g_rtsp_stopping.load()) {
+                const auto now = std::chrono::steady_clock::now();
+                if (now - last_diagnostics >= std::chrono::seconds(10)) {
+                    LogDiagnostics("running");
+                    last_diagnostics = now;
+                }
                 LawrecFramePtr frame;
                 int result = video_queue_.pop(frame, 20);
                 if (result < 0) {
@@ -242,14 +266,16 @@ int StreamingPlayer::Start() {
                     const_cast<uint8_t *>(frame->bytes.data()));
                 data.astPack[0].len = frame->bytes.size();
                 data.astPack[0].pts = frame->pts_us;
-                if (sessionVideoCallback(0, &data, nullptr)) {
-                    video_error_.store(-EIO);
+                int delivered = sessionVideoCallback(0, &data, nullptr);
+                if (delivered) {
+                    video_error_.store(delivered);
                     break;
                 }
             }
         } catch (...) { video_error_.store(-ENOMEM); }
         if (video_error_.load())
             fprintf(stderr, "[lawrec-rtsp] video consumer failed=%d\n", video_error_.load());
+        LogDiagnostics("video-worker-exit");
     });
 
     if (audio_created_) {
@@ -271,8 +297,9 @@ int StreamingPlayer::Start() {
                         data.stream = const_cast<uint8_t *>(frame->bytes.data());
                         data.len = frame->bytes.size();
                         data.time_stamp = frame->pts_us;
-                        if (sessionAudioCallback(0, &data, nullptr)) {
-                            audio_error_.store(-EIO); break;
+                        int delivered = sessionAudioCallback(0, &data, nullptr);
+                        if (delivered) {
+                            audio_error_.store(delivered); break;
                         }
                         last = std::chrono::steady_clock::now();
                     } else if (std::chrono::steady_clock::now() - last > std::chrono::seconds(8)) {
@@ -324,13 +351,13 @@ void StreamingPlayer::Stop() {
     if (audio_worker_.joinable()) audio_worker_.join();
     if (audio_enabled_) {
         int ret = lawrec_audio_unsubscribe(1);
-        if (ret) cleanup_error_ = ret;
+        if (ret && !cleanup_error_) cleanup_error_ = ret;
     }
     video_queue_.close();
     if (video_worker_.joinable()) video_worker_.join();
     // Also query failed subscriptions: cleanup may have quarantined VENC.
     int encoder_ret = lawrec_encoder_unsubscribe(1);
-    if (encoder_ret) cleanup_error_ = encoder_ret;
+    if (encoder_ret && !cleanup_error_) cleanup_error_ = encoder_ret;
 
     if (wake_event_) scheduler_->triggerEvent(wake_event_, this);
     if (server_loop_started_ && server_loop_.joinable()) {
@@ -348,6 +375,7 @@ void StreamingPlayer::Stop() {
 
 
     started_ = false;
+    LogDiagnostics("stopped");
     std::cout << "[lawrec-rtsp] Stop() leave" << std::endl;
 }
 
@@ -384,14 +412,14 @@ int StreamingPlayer::CreateSession(const SessionAttr &session_attr) {
     int ret = CreateVideoEncode(session_attr);
     if (ret < 0) {
         std::cout << "create video encode failed." << std::endl;
-        return -1;
+        return ret;
     }
     std::cout << "[lawrec-rtsp] video encode created idx=" << session_attr.session_idx << std::endl;
 
     ret = createSubSession(sms, session_attr);
     if (ret < 0) {
         std::cout << "create sub session failed." << std::endl;
-        return -1;
+        return ret;
     }
 
     rtspServer_->addServerMediaSession(sms);
@@ -413,6 +441,12 @@ int StreamingPlayer::CreateVideoEncode(const SessionAttr &session_attr) {
     return 0;
 }
 
+bool StreamingPlayer::HasSessionResources(int session_idx) const {
+    return session_info[session_idx].sessionVideoLiveSource ||
+           session_info[session_idx].sessionVideoReplicator ||
+           (session_idx == 0 && (audio_session.g711LiveSource || audio_session.g711Replicator));
+}
+
 int StreamingPlayer::DestroySession(int session_idx) {
     if (session_idx < 0 || session_idx >= MAX_SESSION_NUM) return -1;
     std::cout << "[lawrec-rtsp] DestroySession idx=" << session_idx << " begin" << std::endl;
@@ -426,22 +460,24 @@ int StreamingPlayer::DestroySession(int session_idx) {
 
     session_created_[session_idx] = false;
 
-    if (audio_created_) {
+    if (audio_created_ || audio_session.g711LiveSource || audio_session.g711Replicator) {
         std::cout << "[lawrec-rtsp] audio teardown begin" << std::endl;
+        if (audio_session.g711LiveSource) audio_session.g711LiveSource->stopReader();
         if (audio_session.g711Replicator) {
-            audio_session.g711LiveSource->stopReader();
             Medium::close(audio_session.g711Replicator);
             audio_session.g711Replicator = nullptr;
-        }
+        } else if (audio_session.g711LiveSource) Medium::close(audio_session.g711LiveSource);
         audio_session.g711LiveSource = nullptr;
         audio_created_.store(false);
         std::cout << "[lawrec-rtsp] audio teardown done" << std::endl;
     }
 
-    if (session_info[session_idx].sessionVideoReplicator) {
+    if (session_info[session_idx].sessionVideoLiveSource) {
         if (session_info[session_idx].sessionVideoType == kVideoTypeH264 ||
             session_info[session_idx].sessionVideoType == kVideoTypeH265)
             static_cast<LiveFrameSource *>(session_info[session_idx].sessionVideoLiveSource)->stopReader();
+    }
+    if (session_info[session_idx].sessionVideoReplicator) {
         std::cout << "[lawrec-rtsp] close video replicator idx=" << session_idx
                   << " begin" << std::endl;
         if (session_info[session_idx].sessionVideoType ==  kVideoTypeMjpeg)
@@ -451,6 +487,11 @@ int StreamingPlayer::DestroySession(int session_idx) {
         session_info[session_idx].sessionVideoReplicator = nullptr;
         std::cout << "[lawrec-rtsp] close video replicator idx=" << session_idx
                   << " done" << std::endl;
+    } else if (session_info[session_idx].sessionVideoLiveSource) {
+        // A source can exist even when replicator/session allocation failed.
+        if (session_info[session_idx].sessionVideoType == kVideoTypeMjpeg)
+            Medium::close(static_cast<MjpegLiveVideoSource *>(session_info[session_idx].sessionVideoLiveSource));
+        else Medium::close(static_cast<LiveFrameSource *>(session_info[session_idx].sessionVideoLiveSource));
     }
 
     session_info[session_idx].sessionVideoLiveSource = nullptr;
@@ -461,41 +502,31 @@ int StreamingPlayer::DestroySession(int session_idx) {
 }
 
 int StreamingPlayer::createSubSession(ServerMediaSession *sms, const SessionAttr &session_attr) {
-    if (session_attr.video_type == kVideoTypeH264) {
-        session_info[session_attr.session_idx].sessionVideoType = kVideoTypeH264;
-        session_info[session_attr.session_idx].sessionVideoLiveSource = H264LiveFrameSource::createNew(*env_, 8);
-        if (!session_info[session_attr.session_idx].sessionVideoLiveSource) {
-            std::cout << "failed to create H264LiveFrameSource." << std::endl;
-            return -1;
-        }
-        session_info[session_attr.session_idx].sessionVideoReplicator = StreamReplicator::createNew(*env_, (H264LiveFrameSource*)session_info[session_attr.session_idx].sessionVideoLiveSource, false);
-        LiveServerMediaSession *h264liveSubSession = LiveServerMediaSession::createNew(*env_, (StreamReplicator*)session_info[session_attr.session_idx].sessionVideoReplicator);
-        sms->addSubsession(h264liveSubSession);
-    } else if (session_attr.video_type == kVideoTypeH265) {
-        session_info[session_attr.session_idx].sessionVideoType = kVideoTypeH265;
-        session_info[session_attr.session_idx].sessionVideoLiveSource = H265LiveFrameSource::createNew(*env_, 8);
-        if (!session_info[session_attr.session_idx].sessionVideoLiveSource) {
-            std::cout << "failed to create H265LiveFrameSource." << std::endl;
-            return -1;
-        }
-        session_info[session_attr.session_idx].sessionVideoReplicator = StreamReplicator::createNew(*env_, (H265LiveFrameSource*)session_info[session_attr.session_idx].sessionVideoLiveSource, false);
-        LiveServerMediaSession *h265LiveSubSession = LiveServerMediaSession::createNew(*env_, (StreamReplicator*)session_info[session_attr.session_idx].sessionVideoReplicator);
-        sms->addSubsession(h265LiveSubSession);
-    } else if (session_attr.video_type == kVideoTypeMjpeg) {
-        session_info[session_attr.session_idx].sessionVideoType = kVideoTypeMjpeg;
-        session_info[session_attr.session_idx].sessionVideoLiveSource = MjpegLiveVideoSource::createNew(*env_, 8);
-        if (!session_info[session_attr.session_idx].sessionVideoLiveSource) {
-            std::cout << "failed to create MjpegLiveVideoSource." << std::endl;
-            return -1;
-        }
-        session_info[session_attr.session_idx].sessionVideoReplicator = JpegStreamReplicator::createNew(*env_, (MjpegLiveVideoSource*)session_info[session_attr.session_idx].sessionVideoLiveSource, false);
-        MjpegMediaSubsession *jpegLiveSubSession = MjpegMediaSubsession::createNew(*env_, (JpegStreamReplicator*)session_info[session_attr.session_idx].sessionVideoReplicator);
-        sms->addSubsession(jpegLiveSubSession);
-    }
+    // Business validation already permits only one H264 session; don't keep a
+    // second set of unreachable H265/MJPEG allocation paths here.
+    if (!sms || session_attr.session_idx != 0 || session_attr.video_type != kVideoTypeH264)
+        return -EINVAL;
+    auto &slot = session_info[0];
+    slot.sessionVideoType = kVideoTypeH264;
+    slot.sessionVideoLiveSource = H264LiveFrameSource::createNew(*env_, 8);
+    if (!slot.sessionVideoLiveSource) return -ENOMEM;
+    slot.sessionVideoReplicator = StreamReplicator::createNew(*env_,
+        static_cast<H264LiveFrameSource *>(slot.sessionVideoLiveSource), false);
+    if (!slot.sessionVideoReplicator) return -ENOMEM;
+    auto close_subsession = [](ServerMediaSubsession *p) { Medium::close(p); };
+    std::unique_ptr<ServerMediaSubsession, decltype(close_subsession)> video(
+        LiveServerMediaSession::createNew(*env_, static_cast<StreamReplicator *>(slot.sessionVideoReplicator)),
+        close_subsession);
+    if (!video) return -ENOMEM;
+    if (!sms->addSubsession(video.get())) return -EINVAL;
+    video.release();
 
     if (audio_session.g711Replicator) {
-        LiveServerMediaSession *g711liveSubSession = LiveServerMediaSession::createNew(*env_, audio_session.g711Replicator);
-        sms->addSubsession(g711liveSubSession);
+        std::unique_ptr<ServerMediaSubsession, decltype(close_subsession)> audio(
+            LiveServerMediaSession::createNew(*env_, audio_session.g711Replicator), close_subsession);
+        if (!audio) return -ENOMEM;
+        if (!sms->addSubsession(audio.get())) return -EINVAL;
+        audio.release();
     }
 
     return 0;
@@ -510,10 +541,35 @@ void StreamingPlayer::announceStream(ServerMediaSession* sms, char const* stream
 
 }
 
-unsigned long StreamingPlayer::FrameCount() const { return g_video_cb_count[0].load(); }
-bool StreamingPlayer::Overflowed() const {
+unsigned long StreamingPlayer::FrameCount() const {
     auto *source = static_cast<LiveFrameSource *>(session_info[0].sessionVideoLiveSource);
-    return video_error_.load() != 0 || audio_error_.load() != 0 ||
-           (source && source->overflowed()) ||
-           (audio_session.g711LiveSource && audio_session.g711LiveSource->overflowed());
+    return source ? source->frameCount() : 0;
+}
+void StreamingPlayer::LogDiagnostics(const char *phase) {
+    // Counts describe the source consumer, not RTP packets or VLC reception.
+    fprintf(stderr, "[lawrec-rtsp] runtime phase=%s stopping=%d video_inputs_accepted=%lu audio_inputs_accepted=%lu video_units_ready=%lu video_error=%d audio_error=%d\n",
+        phase, g_rtsp_stopping.load(), g_video_cb_count[0].load(),
+        g_audio_cb_count.load(), FrameCount(), video_error_.load(), audio_error_.load());
+    auto log_source = [&](const char *track, LiveFrameSource *source) {
+        if (!source) return;
+        const auto stats = source->bufferStats();
+        // afterGetting() deliveries are not RTP packet sends or client ACKs.
+        fprintf(stderr, "[rtsp-source] runtime phase=%s track=%s raw_units=%zu raw_bytes=%zu ready_units=%zu retained_bytes=%zu dropped_units=%llu wait_idr=%d nal_deliveries=%llu error=%d\n",
+            phase, track, stats.raw_units, stats.raw_bytes, stats.ready_units, stats.retained_bytes,
+            (unsigned long long)stats.dropped_units, stats.waiting_idr,
+            (unsigned long long)stats.nal_deliveries, source->deliveryError());
+    };
+    log_source("video", static_cast<LiveFrameSource *>(session_info[0].sessionVideoLiveSource));
+    log_source("audio", audio_session.g711LiveSource);
+    lawrec_log_queue_stats("rtsp", phase, "video", video_queue_);
+    lawrec_log_queue_stats("rtsp", phase, "audio", audio_queue_);
+    lawrec_log_process_stats("rtsp", phase);
+}
+int StreamingPlayer::DeliveryError() const {
+    auto *source = static_cast<LiveFrameSource *>(session_info[0].sessionVideoLiveSource);
+    int ret = video_error_.load();
+    if (!ret) ret = audio_error_.load();
+    if (!ret && source) ret = source->deliveryError();
+    if (!ret && audio_session.g711LiveSource) ret = audio_session.g711LiveSource->deliveryError();
+    return ret;
 }

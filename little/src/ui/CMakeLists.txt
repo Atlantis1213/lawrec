@@ -23,6 +23,10 @@ add_executable(${EXE_TARGET}
     ../common/lawrec_settings.cpp
     ../common/lawrec_time.cpp
     ../common/lawrec_network.cpp
+    ../common/lawrec_ipv4_apply.cpp
+    ../common/lawrec_arp.cpp
+    ../common/lawrec_ipv4_transaction.cpp
+    ../common/lawrec_dhcp.cpp
     ../common/lawrec_process.cpp
     ../common/lawrec_wifi_transaction.cpp
     ../common/lawrec_storage.cpp
@@ -30,6 +34,7 @@ add_executable(${EXE_TARGET}
     ../common/lawrec_encoder.cpp
     ../common/lawrec_audio.cpp
     ../playback/lawrec_playback.cpp
+    ../playback/lawrec_demux.cpp
     ${EXE_SRC}
     ${CONTROL_SRC}
     ${RECORD_SRC}
@@ -43,6 +48,21 @@ set(DATAFIFO_ROOT "${CDK_ROOT}/component/datafifo")
 set(LIVE_ROOT "${CDK_ROOT}/thirdparty/live")
 set(MPP_API_ROOT "${LAWREC_SDK_ROOT}/src/big/mpp/userapps/api")
 set(MPP_LIB_ROOT "${LAWREC_SDK_ROOT}/src/big/mpp/userapps/lib")
+set(MP4_ROOT "${CDK_ROOT}/middleware/mp4_format")
+set(MP4_ADAPTER "${CMAKE_CURRENT_LIST_DIR}/../record/prepare_mp4.cmake")
+include("${MP4_ADAPTER}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${MP4_ADAPTER}" "${MP4_ROOT}/src/mp4_format.c" "${MP4_ROOT}/src/libmov/source/mov-writer.c"
+    "${MP4_ROOT}/src/libmov/source/mov-stts.c" "${MP4_ROOT}/src/libmov/source/mov-elst.c")
+set(MP4_ADAPTED_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/sdk-mp4/mp4_format.c")
+lawrec_prepare_mp4("${MP4_ROOT}/src/mp4_format.c" "${MP4_ADAPTED_SOURCE}")
+# Replace only the reviewed wrapper/writer/timing objects; reuse other engines.
+target_sources(${EXE_TARGET} PRIVATE "${MP4_ADAPTED_SOURCE}"
+    "${CMAKE_CURRENT_BINARY_DIR}/sdk-mp4/mov-writer.c"
+    "${CMAKE_CURRENT_BINARY_DIR}/sdk-mp4/mov-stts.c"
+    "${CMAKE_CURRENT_BINARY_DIR}/sdk-mp4/mov-elst.c")
+target_include_directories(${EXE_TARGET} PRIVATE
+    "${MP4_ROOT}/src/libmov/include" "${MP4_ROOT}/src/libflv/include" "${MP4_ROOT}/src/libmov/source")
 set(IPCMSG_INC_DIR "${LAWREC_IPCMSG_INC_DIR}")
 set(MPP_INC_DIR "${LAWREC_MPP_INC_DIR}")
 set(MPP_COMM_INC_DIR "${LAWREC_MPP_COMM_INC_DIR}")

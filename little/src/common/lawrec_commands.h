@@ -28,5 +28,9 @@ typedef enum {
     MSG_CMD_RECORD_QUERY,
     MSG_CMD_RECORD_STATUS,
     MSG_CMD_PLAYBACK_DISPLAY,
+    MSG_CMD_DISPLAY_QUERY,
+    MSG_CMD_DISPLAY_STATUS,
+    MSG_CMD_DISPLAY_RECOVER,
+    MSG_CMD_DISPLAY_RECOVER_RESULT,
 } msg_cmd_e;
 typedef msg_cmd_e ipc_msg_cmd_t;

@@ -62,6 +62,7 @@ endef
 LAWREC_POST_INSTALL_TARGET_HOOKS += lawrec_install_init_script
 define lawrec_install_init_script
 	$(INSTALL) -D -m 0755 $(TOPDIR)/../package/lawrec/S99lawrec $(TARGET_DIR)/etc/init.d/S99lawrec
+	$(INSTALL) -D -m 0755 $(TOPDIR)/../package/lawrec/S45wifi $(TARGET_DIR)/etc/init.d/S45wifi
 	rm -f $(TARGET_DIR)/app/lawrec/rtsp_start.sh
 	rm -f $(TARGET_DIR)/app/lawrec/rtsp_stop.sh
 	rm -f $(TARGET_DIR)/app/lawrec/rtsp_status.sh

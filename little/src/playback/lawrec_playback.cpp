@@ -1,4 +1,5 @@
 #include "lawrec_playback.h"
+#include "lawrec_demux.h"
 #include "../common/lawrec_media.h"
 #include "../common/lawrec_storage.h"
 #include <atomic>
@@ -36,14 +37,14 @@ void state(int value, int error = 0)
     std::lock_guard<std::mutex> guard(mutex);
     status.state = value;
     status.error = error;
-    fprintf(stderr, "[playback] state=%d error=%d frames=%llu\n", value, error,
-            (unsigned long long)status.frames);
+    fprintf(stderr, "[playback] state=%d error=%d cleanup_error=%d retained=%d frames=%llu\n",
+            value, error, status.cleanup_error, poisoned.load(), (unsigned long long)status.frames);
 }
 
 void run(int file)
 {
-    KD_HANDLE demux = nullptr;
-    int error = 0, input_pool = -1, output_pool = -1, mem = -1;
+    LawrecDemux demux(stop);
+    int error = 0, cleanup_error = 0, input_pool = -1, output_pool = -1, mem = -1;
     bool leased = false, initialized = false, started = false, bound = false;
     bool display_requested = false, cleanup_ok = true, completed = false;
     bool audio_present = false, ao_initialized = false, ao_started = false;
@@ -55,22 +56,25 @@ void run(int file)
     size_t map_size = 0;
     auto check = [&](int ret, const char *operation) {
         if (ret) fprintf(stderr, "[playback] %s error=%d\n", operation, ret);
-        return ret;
+        return ret > 0 ? -EIO : ret;
+    };
+    auto cleanup = [&](int ret, const char *operation) {
+        const int result = check(ret, operation);
+        if (result) {
+            if (!cleanup_error) cleanup_error = result;
+            cleanup_ok = false;
+        }
+        return result;
     };
     do {
-        k_mp4_config_s config{};
-        config.config_type = K_MP4_CONFIG_DEMUXER;
-        snprintf(config.demuxer_config.file_name, sizeof(config.demuxer_config.file_name), "/proc/self/fd/%d", file);
-        error = check(kd_mp4_create(&demux, &config), "demux create");
-        if (error) break;
         k_mp4_file_info_s info{};
-        if ((error = check(kd_mp4_get_file_info(demux, &info), "file info"))) break;
+        k_mp4_track_info_s tracks[2]{};
+        if ((error = check(demux.start(file, info, tracks), "demux start"))) break;
         // The SDK frame API does not identify track IDs. Reject ambiguous files.
         if (!info.track_num || info.track_num > 2) { error = -ENOTSUP; break; }
         bool video_present = false;
         for (unsigned i = 0; i < info.track_num; ++i) {
-            k_mp4_track_info_s track{};
-            if ((error = check(kd_mp4_get_track_by_index(demux, i, &track), "track info"))) break;
+            const k_mp4_track_info_s &track = tracks[i];
             if (track.track_type == K_MP4_STREAM_VIDEO && !video_present &&
                 track.video_info.codec_id == K_MP4_CODEC_ID_H264 &&
                 track.video_info.width == 1280 && track.video_info.height == 720) video_present = true;
@@ -84,12 +88,13 @@ void run(int file)
         }
         if (error) break;
         if (!video_present) { error = -ENOTSUP; break; }
-        { std::lock_guard<std::mutex> guard(mutex); status.duration_ms = info.duration; }
+        { std::lock_guard<std::mutex> guard(mutex);
+          status.duration_ms = info.duration; status.audio_present = audio_present; }
         if (stop) break;
         if ((error = check(lawrec_media_acquire(kOwner), "media acquire"))) break;
         leased = true;
         display_requested = true; // Also restore after an ambiguous IPC timeout.
-        if ((error = lawrec_playback_display_request(1))) break;
+        if ((error = check(lawrec_playback_display_request(1), "display enter"))) break;
         k_vb_pool_config pool{};
         pool.mode = VB_REMAP_MODE_NOCACHE;
         pool.blk_cnt = 2; pool.blk_size = kStreamBytes;
@@ -145,7 +150,7 @@ void run(int file)
         auto origin = Clock::now();
         while (!stop) {
             k_mp4_frame_data_s frame{};
-            if ((error = check(kd_mp4_get_frame(demux, &frame), "demux frame"))) break;
+            if ((error = check(demux.next(frame), "demux frame"))) break;
             if (frame.eof) {
                 if (first) { error = -EBADMSG; break; }
                 if ((error = check(kd_mapi_sys_get_vb_block_from_pool_id(input_pool, &physical, kStreamBytes, nullptr), "EOS block"))) break;
@@ -177,6 +182,9 @@ void run(int file)
             if (first) { first_pts = frame.time_stamp; origin = Clock::now(); first = false; }
             unsigned track_index = is_audio ? 1 : 0;
             if (frame.time_stamp < first_pts ||
+                // Also bound a second track's first PTS before constructing a
+                // chrono deadline; malformed metadata must not overflow it.
+                (!seen[track_index] && frame.time_stamp-first_pts > 10000) ||
                 (seen[track_index] && (frame.time_stamp < last_pts[track_index] ||
                  frame.time_stamp-last_pts[track_index] > 10000))) { error = -EBADMSG; break; }
             seen[track_index] = true;
@@ -211,10 +219,11 @@ void run(int file)
                 audio_until = Clock::now() + std::chrono::microseconds(frame.data_length * 125);
             } else error = check(kd_mapi_vdec_send_stream(0, &stream, 1000), "send stream");
             if (error) break; // Keep the input block until decoder teardown.
-            munmap(mapping, map_size); mapping = MAP_FAILED;
-            int released = check(kd_mapi_sys_release_vb_block(physical, kStreamBytes), "release input");
+            if (munmap(mapping, map_size)) { error = check(-errno, "unmap input"); break; }
+            mapping = MAP_FAILED;
+            int released = cleanup(kd_mapi_sys_release_vb_block(physical, kStreamBytes), "release input");
             physical = 0;
-            if (released) { cleanup_ok = false; if (!error) error = released; }
+            if (released && !error) error = released;
             if (error) break;
             k_vdec_chn_status decoded{};
             if ((error = check(kd_mapi_vdec_query_status(0, &decoded), "decode status"))) break;
@@ -233,25 +242,33 @@ void run(int file)
         }
     } while (false);
     // One worker owns both feed and teardown; UI never frees decoder resources.
-    if (audio_bound && check(kd_mapi_adec_unbind_ao(ao, 0), "audio unbind")) cleanup_ok = false;
-    if (adec_started && check(kd_mapi_adec_stop(0), "adec stop")) cleanup_ok = false;
-    if (adec_initialized && check(kd_mapi_adec_deinit(0), "adec deinit")) cleanup_ok = false;
-    if (ao_started && check(kd_mapi_ao_stop(ao), "ao stop")) cleanup_ok = false;
-    if (ao_initialized && check(kd_mapi_ao_deinit(ao), "ao deinit")) cleanup_ok = false;
-    if (bound && check(kd_mapi_vdec_unbind_vo(0, 0, 0), "unbind")) cleanup_ok = false;
-    if (started && check(kd_mapi_vdec_stop(0), "stop")) cleanup_ok = false;
-    if (initialized && check(kd_mapi_vdec_deinit(0), "deinit")) cleanup_ok = false;
-    if (mapping != MAP_FAILED) munmap(mapping, map_size);
-    if (cleanup_ok && physical && check(kd_mapi_sys_release_vb_block(physical, kStreamBytes), "release remaining input")) cleanup_ok = false;
-    if (mem >= 0) close(mem);
-    if (display_requested && lawrec_playback_display_request(0)) cleanup_ok = false;
+    if (audio_bound) cleanup(kd_mapi_adec_unbind_ao(ao, 0), "audio unbind");
+    if (adec_started) cleanup(kd_mapi_adec_stop(0), "adec stop");
+    if (adec_initialized) cleanup(kd_mapi_adec_deinit(0), "adec deinit");
+    if (ao_started) cleanup(kd_mapi_ao_stop(ao), "ao stop");
+    if (ao_initialized) cleanup(kd_mapi_ao_deinit(ao), "ao deinit");
+    if (bound) cleanup(kd_mapi_vdec_unbind_vo(0, 0, 0), "unbind");
+    if (started) cleanup(kd_mapi_vdec_stop(0), "stop");
+    if (initialized) cleanup(kd_mapi_vdec_deinit(0), "deinit");
+    if (mapping != MAP_FAILED && munmap(mapping, map_size)) cleanup(-errno, "unmap remaining input");
+    if (cleanup_ok && physical) cleanup(kd_mapi_sys_release_vb_block(physical, kStreamBytes), "release remaining input");
+    if (mem >= 0 && close(mem)) cleanup(-errno, "close memory fd");
+    if (display_requested) cleanup(lawrec_playback_display_request(0), "display exit");
     // Retain pools if decoder teardown failed: it may still reference them.
-    if (cleanup_ok && output_pool >= 0 && check(kd_mapi_vb_destory_pool(output_pool), "destroy output pool")) cleanup_ok = false;
-    if (cleanup_ok && input_pool >= 0 && check(kd_mapi_vb_destory_pool(input_pool), "destroy input pool")) cleanup_ok = false;
+    if (cleanup_ok && output_pool >= 0) cleanup(kd_mapi_vb_destory_pool(output_pool), "destroy output pool");
+    if (cleanup_ok && input_pool >= 0) cleanup(kd_mapi_vb_destory_pool(input_pool), "destroy input pool");
     if (leased && cleanup_ok) lawrec_media_release(kOwner);
-    if (demux && check(kd_mp4_destroy(demux), "demux destroy") && !error) error = -EIO;
-    close(file);
-    if (!cleanup_ok) { error = error ? error : -EIO; poisoned = true; }
+    int demux_error = check(demux.close(), "demux close");
+    if (!error && demux_error) error = demux_error;
+    if (close(file)) {
+        const int result = check(-errno, "close file");
+        if (!error) error = result;
+    }
+    if (!cleanup_ok) { if (!error) error = cleanup_error; poisoned = true; }
+    {
+        std::lock_guard<std::mutex> guard(mutex);
+        status.cleanup_error = cleanup_error;
+    }
     state(error ? LAWREC_PLAY_FAILED : completed ? LAWREC_PLAY_FINISHED : LAWREC_PLAY_IDLE, error);
     active = false;
 }
@@ -265,6 +282,7 @@ extern "C" int lawrec_playback_start(const char *name)
     int file = lawrec_storage_open_recording(name);
     if (file < 0) return file;
     status = {}; status.state = LAWREC_PLAY_STARTING;
+    snprintf(status.filename, sizeof(status.filename), "%s", name);
     stop = false; paused = false; active = true;
     try { worker = std::thread(run, file); }
     catch (...) { close(file); active = false; status.state = LAWREC_PLAY_FAILED; status.error = -EAGAIN; return -EAGAIN; }
@@ -289,11 +307,18 @@ extern "C" int lawrec_playback_stop_wait(unsigned timeout_ms)
     auto until = Clock::now() + std::chrono::milliseconds(timeout_ms);
     while (active && Clock::now() < until) std::this_thread::sleep_for(std::chrono::milliseconds(10));
     if (active) { fprintf(stderr, "[playback] stop timeout; decoder resources retained\n"); return -ETIMEDOUT; }
+    std::lock_guard<std::mutex> guard(mutex);
+    if (poisoned) {
+        fprintf(stderr, "[playback] stop complete; resources retained error=%d cleanup_error=%d\n",
+                status.error, status.cleanup_error);
+        return status.cleanup_error ? status.cleanup_error : -EIO;
+    }
     return 0;
 }
 extern "C" void lawrec_playback_get_status(lawrec_playback_status *out)
 {
     if (!out) return;
     std::lock_guard<std::mutex> guard(mutex); *out = status; out->active = active;
+    out->resource_retained = poisoned.load();
 }
 extern "C" int lawrec_playback_active(void) { return active || poisoned; }

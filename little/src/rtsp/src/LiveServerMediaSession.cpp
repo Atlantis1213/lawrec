@@ -53,13 +53,20 @@ FramedSource *LiveServerMediaSession::createNewStreamSource(unsigned clientSessi
 RTPSink *LiveServerMediaSession::createNewRTPSink(Groupsock *rtpGroupsock, unsigned char rtpPayloadTypeIfDynamic, FramedSource* inputSource) {
     EncodeType type = ((LiveFrameSource *)fReplicator->inputSource())->GetEncodeType();
     if (type == EncodeType::H264) {
-        OutPacketBuffer::maxSize = 1024 * 1024;
+        OutPacketBuffer::maxSize = LiveFrameSource::kMaxFrameBytes;
         return H264VideoRTPSink::createNew(envir(), rtpGroupsock, rtpPayloadTypeIfDynamic);
     } else if (type == EncodeType::H265) {
-        OutPacketBuffer::maxSize = 1024 * 1024;
+        OutPacketBuffer::maxSize = LiveFrameSource::kMaxFrameBytes;
         return H265VideoRTPSink::createNew(envir(), rtpGroupsock, rtpPayloadTypeIfDynamic);
     } else if (type == EncodeType::G711A) {
-        //return SimpleRTPSink::createNew(envir(), rtpGroupsock, rtpPayloadTypeIfDynamic, 44100, "audio", "PCMA", 2);
+        // Sink construction runs on the single live555 scheduler. Do not give
+        // tiny G711 packets a video-sized buffer; restore the global limit even
+        // if allocation throws, since H264's fragmenter reads it later on PLAY.
+        struct RestoreLimit {
+            unsigned value;
+            ~RestoreLimit() { OutPacketBuffer::maxSize = value; }
+        } restore{OutPacketBuffer::maxSize};
+        OutPacketBuffer::maxSize = 64 * 1024;
         return SimpleRTPSink::createNew(envir(), rtpGroupsock, rtpPayloadTypeIfDynamic, 8000, "audio", "PCMA", 1, False /*allowMultipleFramesPerPacket*/);
     } else {
         std::cout << "createNewRTPSink() -- type not supported yet" << (int) type << std::endl;

@@ -1,6 +1,7 @@
 #include "lawrec_encoder.h"
 #include "lawrec_annexb.h"
 #include "lawrec_settings.h"
+#include "lawrec_config.h"
 #include <cstdio>
 #include <cstring>
 extern "C" {
@@ -19,8 +20,9 @@ std::mutex operations, frames_lock;
 LawrecFrameQueue *subscribers[3]{};
 bool waiting_idr[3]{};
 unsigned owners = 0;
-bool initialized = false, registered = false, started = false, bound = false, poisoned = false;
-int stream_error = 0;
+unsigned applied_frame_rate = 0;
+bool initialized = false, registered = false, started = false, bound = false;
+int stream_error = 0, cleanup_error = 0;
 std::vector<uint8_t> sps, pps;
 
 int fail_stream(int error) {
@@ -94,7 +96,10 @@ k_s32 encoded(k_u32, kd_venc_data_s *data, k_u8 *) {
 int cleanup() {
     int error = 0;
     auto check = [&](const char *name, int ret) {
-        if (ret) { error = ret; fprintf(stderr, "[encoder] %s failed=%d\n", name, ret); }
+        if (ret) {
+            if (!error) error = ret < 0 ? ret : -EIO;
+            fprintf(stderr, "[encoder] %s failed=%d\n", name, ret);
+        }
     };
     if (bound) check("unbind", kd_mapi_venc_unbind_vi(0, vi_channel, channel));
     if (started) check("stop", kd_mapi_venc_stop(channel));
@@ -102,7 +107,8 @@ int cleanup() {
     if (registered) check("unregister", kd_mapi_venc_unregistercallback(channel, &cb));
     if (initialized) check("deinit", kd_mapi_venc_deinit(channel));
     bound = started = registered = initialized = false;
-    if (error) poisoned = true;
+    applied_frame_rate = 0;
+    if (error && !cleanup_error) cleanup_error = error;
     return error;
 }
 }
@@ -110,9 +116,20 @@ int cleanup() {
 int lawrec_encoder_subscribe(int owner, LawrecFrameQueue *queue) {
     if (owner < 1 || owner > 2 || !queue) return -EINVAL;
     std::lock_guard<std::mutex> operation(operations);
-    if (poisoned) return -EIO;
+    if (cleanup_error) return cleanup_error;
     unsigned bit = 1u << owner;
     if (owners & bit) return -EALREADY;
+    lawrec_media_settings settings{};
+    if (!owners) {
+        lawrec_settings_media_current(&settings);
+        if (settings.version != LAWREC_MEDIA_SETTINGS_VERSION ||
+            (settings.video_frame_rate != 15 && settings.video_frame_rate != 30) ||
+            settings.video_bitrate_kbps < 1000 || settings.video_bitrate_kbps > 8000) {
+            fprintf(stderr, "[encoder] reject settings version=%u fps=%u bitrate_kbps=%u\n",
+                    settings.version, settings.video_frame_rate, settings.video_bitrate_kbps);
+            return -EINVAL;
+        }
+    }
     {
         std::lock_guard<std::mutex> frames(frames_lock);
         if (owners && stream_error) return stream_error;
@@ -125,12 +142,19 @@ int lawrec_encoder_subscribe(int owner, LawrecFrameQueue *queue) {
         attr.venc_attr.type = K_PT_H264;
         attr.venc_attr.profile = VENC_PROFILE_H264_HIGH;
         attr.venc_attr.pic_width = 1280; attr.venc_attr.pic_height = 720;
-        attr.venc_attr.stream_buf_cnt = 30;
-        attr.venc_attr.stream_buf_size = (1280*720*3/4 + 0xfff) & ~0xfff;
+        attr.venc_attr.stream_buf_cnt = LAWREC_VENC_STREAM_BUFFER_COUNT;
+        attr.venc_attr.stream_buf_size = LAWREC_VENC_STREAM_BUFFER_SIZE;
         attr.rc_attr.rc_mode = K_VENC_RC_MODE_CBR;
-        attr.rc_attr.cbr.src_frame_rate = attr.rc_attr.cbr.dst_frame_rate = 30;
-        attr.rc_attr.cbr.bit_rate = lawrec_settings_bitrate();
+        // Capture remains 30 FPS. Only the target encoder rate changes; all
+        // consumers keep actual hardware PTS instead of manufacturing a clock.
+        attr.rc_attr.cbr.src_frame_rate = 30;
+        attr.rc_attr.cbr.dst_frame_rate = settings.video_frame_rate;
+        attr.rc_attr.cbr.bit_rate = settings.video_bitrate_kbps;
+        fprintf(stderr, "[encoder] init request venc=%d size=1280x720 src_fps=30 target_fps=%u bitrate_kbps=%u stream_block=%u stream_count=%u\n",
+                channel, settings.video_frame_rate, settings.video_bitrate_kbps,
+                attr.venc_attr.stream_buf_size, attr.venc_attr.stream_buf_cnt);
         ret = kd_mapi_venc_init(channel, &attr);
+        if (!ret) applied_frame_rate = settings.video_frame_rate;
         if (!ret) { initialized = true; ret = kd_mapi_venc_enable_idr(channel, K_TRUE); }
         kd_venc_callback_s cb{}; cb.pfn_data_cb = encoded;
         if (!ret) { ret = kd_mapi_venc_registercallback(channel, &cb); registered = !ret; }
@@ -138,21 +162,27 @@ int lawrec_encoder_subscribe(int owner, LawrecFrameQueue *queue) {
         if (!ret) { ret = kd_mapi_venc_bind_vi(0, vi_channel, channel); bound = !ret; }
     }
     if (!ret) ret = kd_mapi_venc_request_idr(channel);
+    {
+        std::lock_guard<std::mutex> frames(frames_lock);
+        // SDK success does not erase an error delivered by its startup callback.
+        if (!ret) ret = stream_error;
+        if (!ret) owners |= bit;
+        else subscribers[owner] = nullptr;
+    }
     if (ret) {
-        { std::lock_guard<std::mutex> frames(frames_lock); subscribers[owner] = nullptr; }
         queue->fail(ret < 0 ? ret : -EIO);
         if (!owners) cleanup();
-        return ret;
+        fprintf(stderr, "[encoder] subscribe owner=%d failed=%d\n", owner, ret);
+        return ret < 0 ? ret : -EIO;
     }
-    owners |= bit;
-    fprintf(stderr, "[encoder] subscribe owner=%d owners=%u venc=%d\n", owner, owners, channel);
+    fprintf(stderr, "[encoder] subscribe owner=%d owners=%u venc=%d target_fps=%u\n", owner, owners, channel, applied_frame_rate);
     return 0;
 }
 
 int lawrec_encoder_unsubscribe(int owner) {
     if (owner < 1 || owner > 2) return -EINVAL;
     std::lock_guard<std::mutex> operation(operations);
-    if (!(owners & (1u << owner))) return poisoned ? -EIO : 0;
+    if (!(owners & (1u << owner))) return cleanup_error;
     {
         std::lock_guard<std::mutex> frames(frames_lock);
         if (subscribers[owner]) subscribers[owner]->close();
@@ -166,6 +196,13 @@ int lawrec_encoder_unsubscribe(int owner) {
 
 int lawrec_encoder_request_idr() {
     std::lock_guard<std::mutex> operation(operations);
-    if (!owners || poisoned) return -EIO;
-    return kd_mapi_venc_request_idr(channel);
+    if (cleanup_error) return cleanup_error;
+    if (!owners) return -EIO;
+    {
+        std::lock_guard<std::mutex> frames(frames_lock);
+        if (stream_error) return stream_error;
+    }
+    int ret = kd_mapi_venc_request_idr(channel);
+    if (ret) fprintf(stderr, "[encoder] request IDR failed=%d\n", ret);
+    return ret > 0 ? -EIO : ret;
 }

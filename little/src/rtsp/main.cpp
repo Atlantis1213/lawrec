@@ -154,7 +154,10 @@ void rtsp_worker(lawrec_rtsp_config_t config)
                     break;
             }
             unsigned long count = player->FrameCount();
-            if (player->Overflowed()) { ret = -EOVERFLOW; goto fail; }
+            if ((ret = player->DeliveryError())) {
+                std::cerr << "[lawrec-rtsp] delivery failed ret=" << ret << std::endl;
+                goto fail;
+            }
             auto now = std::chrono::steady_clock::now();
             if (count != frames) {
                 frames = count;

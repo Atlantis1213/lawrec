@@ -11,6 +11,7 @@ typedef struct {
     const char *video_type;
     int video_width;
     int video_height;
+    /* Legacy layout retained; storage/settings own directory and file naming. */
     const char *output_dir;
     const char *file_prefix;
 } lawrec_record_config_t;

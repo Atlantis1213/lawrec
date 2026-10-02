@@ -18,6 +18,14 @@ void lawrec_control_set_log_path(const char *path);
 /* preview 就绪状态由大小核 IPC 的请求/结果回调共同驱动。 */
 void lawrec_control_note_preview_request(int enabled);
 void lawrec_control_note_preview_result(int enabled);
+/* No close acknowledgement: stop dependants, but reserve the display from playback. */
+void lawrec_control_note_preview_uncertain(void);
+int lawrec_control_preview_needs_close(void);
+/* Adopt only occupancy; observing an old preview never automatically resumes capture. */
+void lawrec_control_note_display_status(int ready, int preview_occupied, int playback_occupied);
+/* Explicitly confirmed recovery; no live or quarantined local consumer may own media. */
+int lawrec_control_prepare_display_recovery(void);
+void lawrec_control_finish_display_recovery(int result);
 int lawrec_control_is_preview_active(void);
 
 /* RTSP 状态来自小核本地 RTSP worker 的实时状态。 */
@@ -28,6 +36,8 @@ int lawrec_control_is_record_enabled(void);
 int lawrec_control_is_record_running(void);
 int lawrec_control_get_record_state(void);
 int lawrec_control_playback_start(const char *filename);
+/* Confirm in the UI first. Serialized with media starts; changes only UTC wall time. */
+int lawrec_control_set_time_utc(const char *text);
 
 /* UI 本地路径和 socket service 路径共用这一套 RTSP 控制入口。 */
 int lawrec_control_handle_rtsp_cmd(lawrec_service_cmd_e cmd,

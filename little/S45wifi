@@ -1,0 +1,134 @@
+#!/bin/sh
+# lawrec owns wlan0 boot association; never kill DHCP/supplicant on another NIC.
+WIFI_IFACE=wlan0
+WIFI_LOG=/tmp/wifi-autoconnect.log
+WIFI_PIDFILE=/var/run/wifi-autoconnect.pid
+WPA_PIDFILE=/var/run/lawrec-wpa.wlan0.pid
+APP=/app/lawrec/ui/ui
+
+log() { echo "[wifi-autoconnect] $*" >> "$WIFI_LOG"; }
+
+ipv4_idle()
+{
+    if [ -e /var/run/lawrec-ipv4-boot.lock ] && ! flock -n /var/run/lawrec-ipv4-boot.lock true; then
+        log "IPv4 application still in progress; wait before restarting"
+        return 1
+    fi
+}
+
+stop_worker()
+{
+    ipv4_idle || return 1
+    [ -r "$WIFI_PIDFILE" ] || return 0
+    pid=$(cat "$WIFI_PIDFILE")
+    case "$pid" in ''|*[!0-9]*|0|1) log "invalid worker pid"; return 1 ;; esac
+    if [ -r "/proc/$pid/cmdline" ]; then
+        command=$(tr '\000' ' ' < "/proc/$pid/cmdline")
+        case "$command" in
+            *'/etc/init.d/S45wifi worker'*) kill "$pid" || return 1 ;;
+            *) log "worker pid belongs to another process; refusing stop"; return 1 ;;
+        esac
+    fi
+    ipv4_idle || return 1
+    rm -f "$WIFI_PIDFILE"
+}
+
+stop_owned_wpa()
+{
+    [ -r "$WPA_PIDFILE" ] || return 0
+    pid=$(cat "$WPA_PIDFILE")
+    case "$pid" in ''|*[!0-9]*|0|1) log "invalid supplicant pid"; return 1 ;; esac
+    if [ -r "/proc/$pid/cmdline" ]; then
+        command=$(tr '\000' ' ' < "/proc/$pid/cmdline")
+        case "$command" in
+            *' -i wlan0 '*) ;;
+            *) log "supplicant pid is not wlan0; refusing stop"; return 1 ;;
+        esac
+        case "$command" in
+            *" -P $WPA_PIDFILE "*) ;;
+            *) log "supplicant pid is not owned; refusing stop"; return 1 ;;
+        esac
+    fi
+    start-stop-daemon -K -q -p "$WPA_PIDFILE" -x /usr/sbin/wpa_supplicant >/dev/null 2>&1 || true
+    i=0
+    while [ -d "/proc/$pid" ] && [ "$i" -lt 20 ]; do
+        sleep 0.1
+        i=$((i+1))
+    done
+    [ -d "/proc/$pid" ] && { log "supplicant stop timeout"; return 1; }
+    rm -f "$WPA_PIDFILE"
+}
+
+start_wifi()
+{
+    : > "$WIFI_LOG"
+    i=0
+    while [ "$i" -lt 50 ]; do
+        [ -d "/sys/class/net/$WIFI_IFACE" ] && break
+        sleep 0.2
+        i=$((i+1))
+    done
+    [ -d "/sys/class/net/$WIFI_IFACE" ] || { log "wlan0 not found"; return 1; }
+    [ -x "$APP" ] || { log "missing lawrec IPv4 helper"; return 1; }
+    sleep 8
+    "$APP" --dhcp-stop >> "$WIFI_LOG" 2>&1 || { log "owned DHCP stop failed"; return 1; }
+    stop_owned_wpa || return 1
+    if /usr/sbin/wpa_cli -i "$WIFI_IFACE" ping 2>/dev/null | grep -q PONG; then
+        log "unmanaged wlan0 supplicant exists; refusing replacement"
+        return 1
+    fi
+    retry=0
+    while [ "$retry" -lt 3 ]; do
+        retry=$((retry+1))
+        log "association attempt $retry/3"
+        ifconfig "$WIFI_IFACE" up || return 1
+        if /usr/sbin/wpa_supplicant -B -P "$WPA_PIDFILE" -D nl80211 -i "$WIFI_IFACE" \
+                -c /etc/wpa_supplicant.conf >> "$WIFI_LOG" 2>&1; then
+            i=0
+            while [ "$i" -lt 80 ]; do
+                state=$(/usr/sbin/wpa_cli -i "$WIFI_IFACE" status 2>/dev/null | sed -n 's/^wpa_state=//p' | head -n 1)
+                if [ "$state" = COMPLETED ]; then
+                    # No shell sourcing of settings; C++ validates the whole file
+                    # and records the successfully applied policy in /var/run.
+                    "$APP" --ipv4-boot >> "$WIFI_LOG" 2>&1
+                    result=$?
+                    log "IPv4 helper result=$result"
+                    return "$result"
+                fi
+                sleep 0.5
+                i=$((i+1))
+            done
+        fi
+        log "association failed"
+        stop_owned_wpa || return 1
+        sleep 3
+    done
+    return 1
+}
+
+case "$1" in
+    start)
+        mkdir -p /var/run
+        stop_worker || exit 1
+        "$APP" --ipv4-stage >> "$WIFI_LOG" 2>&1 || { log "IPv4 settings staging failed"; exit 1; }
+        start-stop-daemon -S -q -b -m -p "$WIFI_PIDFILE" --startas /bin/sh -- \
+            /etc/init.d/S45wifi worker
+        ;;
+    stop)
+        stop_worker || exit 1
+        "$APP" --dhcp-stop >> "$WIFI_LOG" 2>&1 || { log "owned DHCP stop failed"; exit 1; }
+        stop_owned_wpa || exit 1
+        # Do not bring down an interface still owned by an external supplicant.
+        if ! /usr/sbin/wpa_cli -i "$WIFI_IFACE" ping 2>/dev/null | grep -q PONG; then
+            ifconfig "$WIFI_IFACE" down
+        fi
+        ;;
+    restart) "$0" stop && "$0" start ;;
+    worker)
+        start_wifi
+        result=$?
+        log "worker exit result=$result"
+        exit "$result"
+        ;;
+    *) echo "Usage: $0 {start|stop|restart|worker}"; exit 2 ;;
+esac

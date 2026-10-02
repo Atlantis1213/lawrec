@@ -188,6 +188,7 @@ void scr_preview_set_status(const char *status, lv_color_t color)
 static void scr_preview_back_event(lv_event_t *e)
 {
     (void)e;
+    if (g_back_pending) return;
     /*
      * 如果 RTSP 仍在运行，就先停 RTSP，再等停止结果回来后退出页面。
      * 这样可以保证预览链路和推流链路按顺序回收。

@@ -99,6 +99,7 @@ void scr_preview_set_record_button_stopping(void);
 void scr_preview_request_back(void);
 int scr_preview_is_back_pending(void);
 void scr_preview_clear_back_pending(void);
+void scr_maintenance_recovery_result(int result);
 
 #ifdef __cplusplus
 }

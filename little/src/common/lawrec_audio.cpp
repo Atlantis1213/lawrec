@@ -10,11 +10,13 @@ std::mutex operations, frames_lock;
 LawrecFrameQueue *subscribers[3]{};
 unsigned owners;
 k_handle ai;
-bool ai_ready, ai_started, enc_ready, enc_started, registered, bound, poisoned;
+bool ai_ready, ai_started, enc_ready, enc_started, registered, bound;
+int stream_error, cleanup_error;
 
 k_s32 encoded(k_u32, k_audio_stream *stream, void *) {
     std::lock_guard<std::mutex> guard(frames_lock);
     if (!subscribers[1] && !subscribers[2]) return 0;
+    if (stream_error) return stream_error;
     int error = 0;
     try {
         if (!stream || !stream->stream || !stream->len || stream->len > 65536) {
@@ -35,6 +37,8 @@ k_s32 encoded(k_u32, k_audio_stream *stream, void *) {
         }
     } catch (...) { error = -ENOMEM; }
     if (error) {
+        // Keep the failed source closed to new owners until all current owners leave.
+        stream_error = error;
         for (int i = 1; i <= 2; ++i) {
             if (subscribers[i]) subscribers[i]->fail(error);
             subscribers[i] = nullptr;
@@ -49,7 +53,7 @@ int cleanup() {
     int error = 0;
     auto check = [&](const char *operation, int ret) {
         if (ret) {
-            error = ret;
+            if (!error) error = ret < 0 ? ret : -EIO;
             fprintf(stderr, "[audio] %s failed=%d\n", operation, ret);
         }
     };
@@ -60,7 +64,7 @@ int cleanup() {
     if (enc_ready) check("aenc deinit", kd_mapi_aenc_deinit(0));
     if (ai_ready) check("ai deinit", kd_mapi_ai_deinit(ai));
     bound = ai_started = enc_started = registered = enc_ready = ai_ready = false;
-    if (error) poisoned = true;
+    if (error && !cleanup_error) cleanup_error = error;
     return error;
 }
 }
@@ -68,11 +72,13 @@ int cleanup() {
 int lawrec_audio_subscribe(int owner, LawrecFrameQueue *queue) {
     if (owner < 1 || owner > 2 || !queue) return -EINVAL;
     std::lock_guard<std::mutex> operation(operations);
-    if (poisoned) return -EIO;
+    if (cleanup_error) return cleanup_error;
     const unsigned bit = 1u << owner;
     if (owners & bit) return -EALREADY;
     {
         std::lock_guard<std::mutex> frames(frames_lock);
+        if (owners && stream_error) return stream_error;
+        if (!owners) stream_error = 0;
         queue->reset();
         subscribers[owner] = queue;
     }
@@ -104,25 +110,33 @@ int lawrec_audio_subscribe(int owner, LawrecFrameQueue *queue) {
         if (!ret) { ret = kd_mapi_ai_start(ai); ai_started = !ret; }
         if (!ret) { ret = kd_mapi_aenc_bind_ai(ai, 0); bound = !ret; }
     }
+    {
+        std::lock_guard<std::mutex> frames(frames_lock);
+        // A callback may already have failed while an SDK start call succeeded.
+        if (!ret) ret = stream_error;
+        if (!ret) owners |= bit;
+        else subscribers[owner] = nullptr;
+    }
     if (ret) {
-        { std::lock_guard<std::mutex> frames(frames_lock); subscribers[owner] = nullptr; }
         queue->fail(ret < 0 ? ret : -EIO);
         if (!owners) cleanup();
         fprintf(stderr, "[audio] subscribe owner=%d failed=%d\n", owner, ret);
-        return ret;
+        return ret < 0 ? ret : -EIO;
     }
-    owners |= bit;
     fprintf(stderr, "[audio] subscribe owner=%d mask=%u G711A/8000/mono\n", owner, owners);
     return 0;
 }
 
-int lawrec_audio_unsubscribe(int owner) {
+int lawrec_audio_unsubscribe(int owner, bool keep_tail) {
     if (owner < 1 || owner > 2) return -EINVAL;
     std::lock_guard<std::mutex> operation(operations);
-    if (!(owners & (1u << owner))) return poisoned ? -EIO : 0;
+    if (!(owners & (1u << owner))) return cleanup_error;
     {
         std::lock_guard<std::mutex> frames(frames_lock);
-        if (subscribers[owner]) subscribers[owner]->close();
+        if (subscribers[owner]) {
+            if (keep_tail) subscribers[owner]->finish();
+            else subscribers[owner]->close();
+        }
         subscribers[owner] = nullptr;
     }
     owners &= ~(1u << owner);

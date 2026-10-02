@@ -8,8 +8,11 @@
 #include "mobile_face.h"
 #include "lawrec_rtsp_compat.h"
 #include "lawrec_preview.h"
+#include "lawrec_ipc_server.h"
+#include "lawrec_display.h"
 #include "../little/src/common/lawrec_preview_wire.h"
 #include "../little/src/common/lawrec_playback_wire.h"
+#include "../little/src/common/lawrec_config.h"
 #include "util.h"
 #include "mpi_sys_api.h"
 
@@ -31,6 +34,7 @@ using namespace nncase::runtime::detail;
 #include <sys/mman.h>
 #include <signal.h>
 #include <atomic>
+#include <cerrno>
 #include <fcntl.h>
 #include "k_module.h"
 #include <dirent.h>
@@ -127,7 +131,6 @@ static bool key_press = false;
 bool sensor_process = true;
 bool is_clear_feature = false;
 std::string name;
-k_s32 s32Id1;
 pthread_t threadid1;
 pthread_t ipc_run_handle;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -213,43 +216,19 @@ int get_keyvalue(int fd)
 extern k_s32 kd_display_set_backlight(void);
 extern k_s32 kd_display_reset(void);
 int sample_sys_bind_init(void);
-static void sample_vicap_unbind_vo(k_mpp_chn vicap_mpp_chn, k_mpp_chn vo_mpp_chn);
+static int sample_vicap_unbind_vo(k_mpp_chn vicap_mpp_chn, k_mpp_chn vo_mpp_chn);
 
 std::atomic<bool> quit(true);
 static LawrecPreviewController g_preview;
-static bool g_playback_display = false;
+static LawrecDisplayController g_display;
 
 /* Only switch video layers; connector/DSI/VO and Linux UI stay alive. */
 static int playback_display(const lawrec_playback_wire_t &request)
 {
     if (!g_preview.BackendReady()) return -11;
-    if (!request.enabled) {
-        int ret = kd_mpi_vo_disable_video_layer(K_VO_LAYER0);
-        if (ret) return ret;
-        ret = kd_mpi_vo_enable_video_layer(K_VO_LAYER1);
-        if (!ret) g_playback_display = false;
-        return ret;
-    }
+    if (!request.enabled) return g_display.Recover();
     if (g_preview.Enabled() || g_preview.Bound()) return -16;
-    if (request.width != 1280 || request.height != 720) return -22;
-    k_vo_video_layer_attr attr = {};
-    attr.img_size.width = request.width;
-    attr.img_size.height = request.height;
-    attr.pixel_format = PIXEL_FORMAT_YVU_PLANAR_420;
-    attr.stride = (request.width / 8 - 1) | ((request.height - 1) << 16);
-    attr.func = K_VO_SCALER_ENABLE;
-    attr.scaler_attr.out_size.width = 480;
-    attr.scaler_attr.out_size.height = 270;
-    attr.scaler_attr.stride = (480 / 8 - 1) | ((270 - 1) << 16);
-    attr.display_rect.y = 200;
-    int ret = kd_mpi_vo_set_video_layer_attr(K_VO_LAYER0, &attr);
-    if (ret) return ret;
-    ret = kd_mpi_vo_disable_video_layer(K_VO_LAYER1);
-    if (ret) return ret;
-    ret = kd_mpi_vo_enable_video_layer(K_VO_LAYER0);
-    if (ret) kd_mpi_vo_enable_video_layer(K_VO_LAYER1);
-    else g_playback_display = true;
-    return ret;
+    return g_display.Enable(request.width, request.height);
 }
 static LawrecRtspCompat g_rtsp_compat(LAWREC_RTSP_DEFAULT_PORT,
                                       LAWREC_RTSP_DEFAULT_STREAM_NAME);
@@ -261,7 +240,16 @@ int pressed_key = 0;
 k_dma_dev_attr_t dma_dev_attr;
 k_dma_chn_attr_u dma_chn_attr[DMA_MAX_CHN_NUMS];
 k_video_frame_info df_info_dst;
-bool app_run = true;
+std::atomic<bool> app_run(true);
+static volatile sig_atomic_t g_stop_signal;
+
+static bool lawrec_app_running()
+{
+    return app_run.load() && !g_stop_signal;
+}
+
+void handle_feature(k_s32, k_ipcmsg_message_t *);
+static LawrecIpcServer g_ipc_server(LAWREC_IPC_SERVICE_NAME, handle_feature, lawrec_app_running);
 
 /*
  * Preview/display state currently lives in main.cc. Before larger module
@@ -271,7 +259,8 @@ bool app_run = true;
 
 static int lawrec_preview_enter(void)
 {
-    if (g_playback_display) return -16;
+    if (!lawrec_app_running()) return -11;
+    if (g_display.Busy()) return -16;
     return g_preview.Enter(sample_sys_bind_init);
 }
 
@@ -321,15 +310,7 @@ static void lawrec_rtsp_fill_status(lawrec_rtsp_status_t *status)
 
 static int ipc_send_payload(ipc_msg_cmd_t cmd, const void *content, uint32_t content_size)
 {
-    k_ipcmsg_message_t *pReq;
-
-    pReq = kd_ipcmsg_create_message(SEND_ONLY_MODULE_ID, cmd,
-                                    const_cast<void *>(content), content_size);
-    if (!pReq) return -1;
-    int ret = kd_ipcmsg_send_only(s32Id1, pReq);
-    kd_ipcmsg_destroy_message(pReq);
-    if (ret) printf("[lawrec] ipc send cmd=%u error=%d\n", cmd, ret);
-    return ret;
+    return g_ipc_server.Send(SEND_ONLY_MODULE_ID, cmd, content, content_size);
 }
 
 static int lawrec_rtsp_start(void)
@@ -436,11 +417,9 @@ int ipc_send_thread(ipc_msg_cmd_t cmd)
             printf("can not recongnise ipc_msg cmd\n");
             return -1;
     }
-    k_ipcmsg_message_t* pReq = kd_ipcmsg_create_message(SEND_ONLY_MODULE_ID, cmd, content, content_size);
-    kd_ipcmsg_send_only(s32Id1, pReq);
-    kd_ipcmsg_destroy_message(pReq);
+    int ret = ipc_send_payload(cmd, content, content_size);
     usleep(SEND_TIME_INTERVAL_US * 3);
-    return 0;
+    return ret;
 }
 
 /*
@@ -451,6 +430,21 @@ int ipc_send_thread(ipc_msg_cmd_t cmd)
 void handle_feature(k_s32 s32Id, k_ipcmsg_message_t* msg)
 {
     if (!msg || (msg->u32BodyLen && !msg->pBody)) return;
+    if (msg->u32CMD == MSG_CMD_DISPLAY_QUERY) {
+        if (!msg->pBody || msg->u32BodyLen != sizeof(lawrec_preview_wire_t)) return;
+        lawrec_preview_wire_t request;
+        memcpy(&request, msg->pBody, sizeof(request));
+        if (request.version != LAWREC_PREVIEW_WIRE_VERSION) return;
+        bool ready, enabled, bound;
+        g_preview.Snapshot(&ready, &enabled, &bound);
+        lawrec_display_status_t status{LAWREC_DISPLAY_STATUS_VERSION, request.sequence, 0,
+            (uint32_t)ready, (uint32_t)enabled, (uint32_t)bound, (uint32_t)g_display.Busy()};
+        ipc_send_payload(MSG_CMD_DISPLAY_STATUS, &status, sizeof(status));
+        printf("[lawrec-ipc] display snapshot seq=%u ready=%u enabled=%u bound=%u playback=%u\n",
+               status.sequence, status.backend_ready, status.preview_enabled,
+               status.preview_bound, status.playback_enabled);
+        return;
+    }
     if (msg->u32CMD == MSG_CMD_PLAYBACK_DISPLAY) {
         int result = -22;
         lawrec_playback_wire_t request = {};
@@ -462,7 +456,7 @@ void handle_feature(k_s32 s32Id, k_ipcmsg_message_t* msg)
         printf("[playback] display enabled=%u result=%d\n", request.enabled, result);
         auto *response = kd_ipcmsg_create_resp_message(msg, result, NULL, 0);
         if (response) {
-            int ret = kd_ipcmsg_send_async(s32Id, response, NULL);
+            int ret = g_ipc_server.Reply(s32Id, response);
             if (ret) printf("[playback] response failed ret=%d\n", ret);
             kd_ipcmsg_destroy_message(response);
         }
@@ -479,7 +473,8 @@ void handle_feature(k_s32 s32Id, k_ipcmsg_message_t* msg)
         if (!msg->pBody || !msg->u32BodyLen || msg->u32BodyLen > sizeof(dir_name) ||
             !memchr(msg->pBody, 0, msg->u32BodyLen)) return;
     }
-    if (msg->u32CMD == MSG_CMD_PREVIEW_ENTER || msg->u32CMD == MSG_CMD_PREVIEW_EXIT) {
+    if (msg->u32CMD == MSG_CMD_PREVIEW_ENTER || msg->u32CMD == MSG_CMD_PREVIEW_EXIT ||
+        msg->u32CMD == MSG_CMD_DISPLAY_RECOVER) {
         if (!msg->pBody || msg->u32BodyLen != sizeof(lawrec_preview_wire_t)) {
             printf("[lawrec] reject preview protocol length; update both cores\n");
             return;
@@ -487,9 +482,13 @@ void handle_feature(k_s32 s32Id, k_ipcmsg_message_t* msg)
         lawrec_preview_wire_t wire;
         memcpy(&wire, msg->pBody, sizeof(wire));
         if (wire.version != LAWREC_PREVIEW_WIRE_VERSION) return;
-        wire.result = msg->u32CMD == MSG_CMD_PREVIEW_ENTER ? lawrec_preview_enter() : lawrec_preview_exit();
+        if (msg->u32CMD == MSG_CMD_DISPLAY_RECOVER) {
+            wire.result = !g_preview.BackendReady() ? -EAGAIN : lawrec_preview_exit();
+            if (!wire.result) wire.result = g_display.Recover();
+        } else wire.result = msg->u32CMD == MSG_CMD_PREVIEW_ENTER ? lawrec_preview_enter() : lawrec_preview_exit();
         printf("[lawrec] preview cmd=%u seq=%u result=%d\n", msg->u32CMD, wire.sequence, wire.result);
-        ipc_send_payload(msg->u32CMD == MSG_CMD_PREVIEW_ENTER ? MSG_CMD_PREVIEW_ENTER_RESULT : MSG_CMD_PREVIEW_EXIT_RESULT,
+        ipc_send_payload(msg->u32CMD == MSG_CMD_DISPLAY_RECOVER ? MSG_CMD_DISPLAY_RECOVER_RESULT :
+                         msg->u32CMD == MSG_CMD_PREVIEW_ENTER ? MSG_CMD_PREVIEW_ENTER_RESULT : MSG_CMD_PREVIEW_EXIT_RESULT,
                          &wire, sizeof(wire));
         return;
     }
@@ -582,33 +581,9 @@ void handle_feature(k_s32 s32Id, k_ipcmsg_message_t* msg)
 }
 
 
-static void* thread_ipcmsg(void* arg)
+void *ipc_msg_server(void *)
 {
-    kd_ipcmsg_run(s32Id1);
-    return NULL;
-}
-
-void *ipc_msg_server(void *arg)
-{
-
-    int ret = 0;
-    k_ipcmsg_connect_t stConnectAttr;
-
-    stConnectAttr.u32RemoteId = 0;
-    stConnectAttr.u32Port = 101;
-    stConnectAttr.u32Priority = 0;
-    kd_ipcmsg_add_service(LAWREC_IPC_SERVICE_NAME,&stConnectAttr);
-
-    if(ret != 0)
-    {
-        printf("kd_ipcmsg_add_service return err:%x\n", ret);
-    }
-    ret = kd_ipcmsg_connect(&s32Id1, LAWREC_IPC_SERVICE_NAME, handle_feature);
-    if(ret != 0)
-    {
-        printf("Connect fail\n");
-    }
-    kd_ipcmsg_run(s32Id1);
+    g_ipc_server.Run();
     return NULL;
 }
 
@@ -617,16 +592,19 @@ static int lawrec_start_ipc_server(pthread_t *ipc_message_handle)
     if (LAWREC_STAGE0_PREVIEW_ONLY || ipc_message_handle == NULL)
         return 0;
 
-    return pthread_create(ipc_message_handle, NULL, ipc_msg_server, NULL);
+    int ret = g_ipc_server.Init();
+    if (ret) return ret;
+    ret = pthread_create(ipc_message_handle, NULL, ipc_msg_server, NULL);
+    if (ret) kd_ipcmsg_del_service(LAWREC_IPC_SERVICE_NAME);
+    return ret;
 }
 
 void fun_sig(int sig)
 {
     if(sig == SIGINT)
     {
-        printf("recive ctrl+c\n");
-        app_run = false;
-        quit.store(false);
+        /* No stdio or mutex/atomic library calls from a signal handler. */
+        g_stop_signal = 1;
     }
 }
 
@@ -764,12 +742,16 @@ int vo_creat_layer_test(k_vo_layer chn_id, layer_info *info)
     attr.scaler_attr = info->attr;
 
     // set video layer atrr
-    kd_mpi_vo_set_video_layer_attr(chn_id, &attr);
+    int ret = kd_mpi_vo_set_video_layer_attr(chn_id, &attr);
+    if (ret) {
+        printf("[lawrec-display] layer=%d attributes failed=%d\n", (int)chn_id, ret);
+        return ret;
+    }
 
     // enable layer
-    kd_mpi_vo_enable_video_layer(chn_id);
-
-    return 0;
+    ret = kd_mpi_vo_enable_video_layer(chn_id);
+    if (ret) printf("[lawrec-display] layer=%d enable failed=%d\n", (int)chn_id, ret);
+    return ret;
 }
 
 
@@ -796,18 +778,77 @@ k_s32 sample_connector_init(void)
         return ret;
     }
 
+#if defined(CONFIG_BOARD_K230_CANMV_LCKFB)
+    /* LCKFB panel sequence + this timing passed the DSI-pattern touch test.
+     * With a 594 MHz parent, divider 21 means /22 = 27000 kHz.
+     * Normal VO/UI output must be checked separately on the board. */
+    connector_info.pixclk_div = 21;
+    connector_info.phy_attr.n = 3;
+    connector_info.phy_attr.m = 52;
+    connector_info.phy_attr.voc = 0x1f;
+    connector_info.phy_attr.hs_freq = 0xb5;
+    connector_info.resolution.pclk = 27000;
+    connector_info.resolution.phyclk = 324000;
+    connector_info.resolution.htotal = 528;
+    connector_info.resolution.hdisplay = 480;
+    connector_info.resolution.hsync_len = 8;
+    connector_info.resolution.hback_porch = 10;
+    connector_info.resolution.hfront_porch = 30;
+    connector_info.resolution.vtotal = 870;
+    connector_info.resolution.vdisplay = 800;
+    connector_info.resolution.vsync_len = 10;
+    connector_info.resolution.vback_porch = 20;
+    connector_info.resolution.vfront_porch = 40;
+#endif
+    connector_info.dsi_test_mode = 0;
+    connector_info.screen_test_mode = 0;
+
     connector_fd = kd_mpi_connector_open(connector_info.connector_name);
     if (connector_fd < 0) {
         printf("%s, connector open failed.\n", __func__);
         return K_ERR_VO_NOTREADY;
     }
 
-    // set connect power
-    kd_mpi_connector_power_set(connector_fd, K_TRUE);
-    // connector init
-    kd_mpi_connector_init(connector_fd, connector_info);
+    printf("[lawrec-display] connector power/reset begin\n");
+    fflush(stdout);
 
-    return 0;
+    ret = kd_mpi_connector_power_set(connector_fd, K_TRUE);
+
+    printf("[lawrec-display] connector power/reset result=%d\n", (int)ret);
+    fflush(stdout);
+
+    if (ret != 0) {
+        kd_mpi_connector_close(connector_fd);
+        return ret;
+    }
+
+
+    printf("[lawrec-display] connector init: normal VO output, dsi_pattern=0\n");
+    printf("[lawrec-display] config type=%d pixclk_div=%u phy(n=%u m=%u voc=0x%x hs=0x%x)\n",
+           (int)connector_info.type, connector_info.pixclk_div,
+           connector_info.phy_attr.n, connector_info.phy_attr.m,
+           connector_info.phy_attr.voc, connector_info.phy_attr.hs_freq);
+#if defined(CONFIG_BOARD_K230_CANMV_LCKFB)
+    printf("[lawrec-display] LCKFB timing: pclk=%u phyclk=%u\n",
+           connector_info.resolution.pclk, connector_info.resolution.phyclk);
+    printf("[lawrec-display] timing h(total/display/sync/back/front)=%u/%u/%u/%u/%u\n",
+           connector_info.resolution.htotal, connector_info.resolution.hdisplay,
+           connector_info.resolution.hsync_len, connector_info.resolution.hback_porch,
+           connector_info.resolution.hfront_porch);
+    printf("[lawrec-display] timing v(total/display/sync/back/front)=%u/%u/%u/%u/%u\n",
+           connector_info.resolution.vtotal, connector_info.resolution.vdisplay,
+           connector_info.resolution.vsync_len, connector_info.resolution.vback_porch,
+           connector_info.resolution.vfront_porch);
+#endif
+    fflush(stdout);
+
+    ret = kd_mpi_connector_init(connector_fd, connector_info);
+
+    printf("[lawrec-display] connector init result=%d\n", (int)ret);
+    fflush(stdout);
+
+    kd_mpi_connector_close(connector_fd);
+    return ret;
 }
 
 
@@ -818,7 +859,8 @@ static k_s32 vo_layer_vdss_bind_vo_config(void)
 
     memset(&info, 0, sizeof(info));
 
-    sample_connector_init();
+    int ret = sample_connector_init();
+    if (ret) return ret;
 
 #if defined(CONFIG_BOARD_K230_CANMV_LCKFB)
     info.act_size.width = ISP_CHN0_HEIGHT;
@@ -834,7 +876,22 @@ static k_s32 vo_layer_vdss_bind_vo_config(void)
     info.global_alptha = 0xff;
     info.offset.x = 0;//(1080-w)/2,
     info.offset.y = 0;//(1920-h)/2;
-    vo_creat_layer_test(chn_id, &info);
+    /* The SDK demo helper discards both MPI return values; use checked calls. */
+    k_vo_video_layer_attr attr = {};
+    attr.display_rect = info.offset;
+    attr.img_size = info.act_size;
+    attr.pixel_format = info.format;
+    attr.stride = (info.act_size.width / 8 - 1) |
+                  ((info.act_size.height - 1) << 16);
+    attr.func = info.func;
+    ret = kd_mpi_vo_set_video_layer_attr(chn_id, &attr);
+    printf("[lawrec-preview] VO layer=%d size=%ux%u rotation=%u stride=0x%x attr result=%d\n",
+           (int)chn_id, info.act_size.width, info.act_size.height,
+           (unsigned int)info.func, attr.stride, ret);
+    if (ret) return ret;
+    ret = kd_mpi_vo_enable_video_layer(chn_id);
+    printf("[lawrec-preview] VO layer=%d enable result=%d\n", (int)chn_id, ret);
+    if (ret) return ret;
     if (vicap_install_osd == 1)
     {
         osd_info osd;
@@ -850,30 +907,30 @@ static k_s32 vo_layer_vdss_bind_vo_config(void)
     }
     else
     {
-        printf("[lawrec-big] A/B test: K_VO_OSD3 disabled, keep connector/layer1/vo_enable/sys_bind only\n");
+        printf("[lawrec-display] OSD3 disabled; Linux DRM owns the UI overlay\n");
     }
-    kd_mpi_vo_enable();
-    return 0;
+    ret = kd_mpi_vo_enable();
+    printf("[lawrec-display] VO enable result=%d\n", ret);
+    return ret;
 }
 
-static void sample_vo_fn(void *arg)
+static k_s32 g_vo_init_result;
+static k_s32 sample_vo_fn(void *arg)
 {
     // set hardware reset;
     usleep(10000);
-    vo_layer_vdss_bind_vo_config();
-    return;
+    return vo_layer_vdss_bind_vo_config();
 }
 
 static int sample_vo_init(void)
 {
     usleep(10000);
-    vo_layer_vdss_bind_vo_config();
-    return 0;
+    return vo_layer_vdss_bind_vo_config();
 }
 
 static void *sample_vo_thread(void *arg)
 {
-    TEST_TIME(sample_vo_fn(arg), "sample_vo_fn");
+    TEST_TIME(g_vo_init_result = sample_vo_fn(arg), "sample_vo_fn");
     return NULL;
 }
 
@@ -886,15 +943,15 @@ k_vicap_sensor_type sensor_type;
 k_video_frame_info dump_info;
 k_vb_config config;
 
-static void sample_vicap_unbind_vo(k_mpp_chn vicap_mpp_chn, k_mpp_chn vo_mpp_chn)
+static int sample_vicap_unbind_vo(k_mpp_chn vicap_mpp_chn, k_mpp_chn vo_mpp_chn)
 {
     k_s32 ret;
 
     ret = kd_mpi_sys_unbind(&vicap_mpp_chn, &vo_mpp_chn);
-    if (ret) {
-        printf("kd_mpi_sys_unbind failed:0x%x\n", ret);
-    }
-    return;
+    printf("[lawrec-preview] unbind VI dev=%u chn=%u -> VO dev=%u chn=%u result=%d\n",
+           vicap_mpp_chn.dev_id, vicap_mpp_chn.chn_id,
+           vo_mpp_chn.dev_id, vo_mpp_chn.chn_id, ret);
+    return ret;
 }
 
 int sample_sys_bind_init(void)
@@ -911,9 +968,9 @@ int sample_sys_bind_init(void)
     vo_mpp_chn.chn_id = K_VO_DISPLAY_CHN_ID1;
 
     ret = kd_mpi_sys_bind(&vicap_mpp_chn, &vo_mpp_chn);
-    if (ret) {
-        printf("kd_mpi_sys_unbind failed:0x%x\n", ret);
-    }
+    printf("[lawrec-preview] bind VI dev=%u chn=%u -> VO dev=%u chn=%u result=%d\n",
+           vicap_mpp_chn.dev_id, vicap_mpp_chn.chn_id,
+           vo_mpp_chn.dev_id, vo_mpp_chn.chn_id, ret);
     return ret;
 }
 
@@ -926,7 +983,7 @@ int sample_vb_init(void)
     memset(&config, 0, sizeof(config));
     config.max_pool_cnt = 64;
 
-    config.comm_pool[0].blk_cnt = 5;
+    config.comm_pool[0].blk_cnt = LAWREC_CAPTURE_BUFFER_COUNT;
     config.comm_pool[0].mode = VB_REMAP_MODE_NOCACHE;
     config.comm_pool[0].blk_size = VICAP_ALIGN_UP((ISP_CHN0_WIDTH * ISP_CHN0_HEIGHT * 3 / 2), VICAP_ALIGN_1K);
     //gdma
@@ -934,9 +991,11 @@ int sample_vb_init(void)
     // config.comm_pool[1].blk_size = ISP_OUT_HEIGHT*ISP_OUT_WIDTH*3;
     // config.comm_pool[1].mode = VB_REMAP_MODE_NOCACHE;
     //VB for RGB888 output
-    config.comm_pool[1].blk_cnt = 5;
+    config.comm_pool[1].blk_cnt = LAWREC_CAPTURE_BUFFER_COUNT;
     config.comm_pool[1].mode = VB_REMAP_MODE_NOCACHE;
-    config.comm_pool[1].blk_size = VICAP_ALIGN_UP((ISP_CHN1_HEIGHT * ISP_CHN1_WIDTH * 3 ), VICAP_ALIGN_1K);
+    config.comm_pool[1].blk_size = VICAP_ALIGN_UP(lawrec_ai_pipeline_enabled() ?
+        ISP_CHN1_HEIGHT * ISP_CHN1_WIDTH * 3 :
+        ISP_CHN1_HEIGHT * ISP_CHN1_WIDTH * 3 / 2, VICAP_ALIGN_1K);
 
     /*
      * Reserve dedicated pools for the little-core RTSP encode path.
@@ -944,13 +1003,13 @@ int sample_vb_init(void)
      * these extra blocks kd_mapi_venc_init() fails with "no blk".
      */
     rtsp_venc_frame_size = VICAP_ALIGN_UP((1280 * 720 * 3 / 2), 0x1000);
-    rtsp_venc_stream_size = VICAP_ALIGN_UP((1280 * 720 / 2), 0x1000);
+    rtsp_venc_stream_size = LAWREC_VENC_STREAM_BUFFER_SIZE;
 
     config.comm_pool[2].blk_cnt = 8;
     config.comm_pool[2].mode = VB_REMAP_MODE_NOCACHE;
     config.comm_pool[2].blk_size = rtsp_venc_frame_size;
 
-    config.comm_pool[3].blk_cnt = 30;
+    config.comm_pool[3].blk_cnt = LAWREC_VENC_STREAM_BUFFER_COUNT;
     config.comm_pool[3].mode = VB_REMAP_MODE_NOCACHE;
     config.comm_pool[3].blk_size = rtsp_venc_stream_size;
 
@@ -962,6 +1021,10 @@ int sample_vb_init(void)
     config.comm_pool[5].blk_cnt = 25;
     config.comm_pool[5].mode = VB_REMAP_MODE_NOCACHE;
     config.comm_pool[5].blk_size = 8000 * 2 * 4 / 25 * 2;
+
+    for (unsigned i = 0; i < 6; ++i)
+        printf("[lawrec-vb] pool=%u block=%llu count=%u\n", i,
+               (unsigned long long)config.comm_pool[i].blk_size, config.comm_pool[i].blk_cnt);
 
     ret = kd_mpi_vb_set_config(&config);
     if (ret) {
@@ -1043,7 +1106,7 @@ int sample_vivcap_init( void )
     chn_attr.chn_enable = K_TRUE;
     chn_attr.pix_format = PIXEL_FORMAT_YVU_PLANAR_420;
     chn_attr.scale_win = chn_attr.out_win;
-    chn_attr.buffer_num = VICAP_MAX_FRAME_COUNT;//at least 3 buffers for isp
+    chn_attr.buffer_num = LAWREC_CAPTURE_BUFFER_COUNT;
     chn_attr.buffer_size = VICAP_ALIGN_UP((ISP_CHN0_WIDTH * ISP_CHN0_HEIGHT * 3 / 2), VICAP_ALIGN_1K);
     vicap_chn = VICAP_CHN_ID_0;
 
@@ -1071,7 +1134,7 @@ int sample_vivcap_init( void )
     chn_attr.crop_enable = K_FALSE;
     chn_attr.scale_enable = K_FALSE;
     chn_attr.chn_enable = K_TRUE;
-    chn_attr.buffer_num = VICAP_MAX_FRAME_COUNT;//at least 3 buffers for isp
+    chn_attr.buffer_num = LAWREC_CAPTURE_BUFFER_COUNT;
     if (lawrec_ai_pipeline_enabled()) {
         chn_attr.pix_format = PIXEL_FORMAT_RGB_888_PLANAR;
         chn_attr.buffer_size =
@@ -1112,6 +1175,13 @@ int sample_vivcap_init( void )
     chn_attr.pix_format = PIXEL_FORMAT_YUV_SEMIPLANAR_420;
     chn_attr.buffer_num = 6;
     chn_attr.buffer_size = VICAP_ALIGN_UP((1280 * 720 * 3 / 2), 0x1000);
+#if defined(CONFIG_BOARD_K230_CANMV_LCKFB)
+    /* RTSP and record both consume CHN1 through one shared VENC0. An unused
+     * enabled CHN2 reserves camera buffers but has no bound/dump consumer. */
+    chn_attr.chn_enable = K_FALSE;
+#endif
+    printf("[lawrec-capture] chn0/chn1 buffers=%u chn2_enabled=%d\n",
+           LAWREC_CAPTURE_BUFFER_COUNT, (int)chn_attr.chn_enable);
 
     ret = kd_mpi_vicap_set_chn_attr(vicap_dev, VICAP_CHN_ID_2, chn_attr);
     if (ret) {
@@ -1130,16 +1200,17 @@ int sample_vivcap_init( void )
 
     ret = kd_mpi_vicap_init(vicap_dev);
     if (ret) {
-        printf("sample_vicap, kd_mpi_vicap_init failed.\n");
+        printf("[lawrec-capture] init failed ret=%d hex=0x%08x\n", ret, (unsigned)ret);
         return ret;
         // goto err_exit;
     }
     ret = kd_mpi_vicap_start_stream(vicap_dev);
     if (ret) {
-        printf("sample_vicap, kd_mpi_vicap_init failed.\n");
+        printf("[lawrec-capture] start_stream failed ret=%d hex=0x%08x\n", ret, (unsigned)ret);
         return ret;
         // goto err_exit;
     }
+    printf("[lawrec-capture] start_stream result=0 sensor=%d\n", sensor_type);
     return ret;
 }
 
@@ -1154,7 +1225,7 @@ static void *exit_app(void *arg)
     tty_fd = open("/dev/tty", O_RDONLY | O_NONBLOCK);
     if (tty_fd >= 0)
     {
-        while (app_run)
+        while (lawrec_app_running())
         {
             int ret = read(tty_fd, &ch, 1);
             if (ret == 1 && (ch == 'q' || ch == 'Q'))
@@ -1176,25 +1247,27 @@ static void *exit_app(void *arg)
         return NULL;
     }
 
-    while (app_run)
+    /* Never block shutdown in getchar() when /dev/tty is unavailable. */
+    int stdin_flags = fcntl(STDIN_FILENO, F_GETFL);
+    if (stdin_flags < 0 || fcntl(STDIN_FILENO, F_SETFL, stdin_flags | O_NONBLOCK) < 0) {
+        printf("[lawrec-big] nonblocking stdin unavailable errno=%d; use SIGINT to quit\n", errno);
+        return NULL;
+    }
+    while (lawrec_app_running())
     {
-        int input = getchar();
-        if (input == 'q' || input == 'Q')
+        int count = read(STDIN_FILENO, &ch, 1);
+        if (count == 1 && (ch == 'q' || ch == 'Q'))
         {
             printf("\n[lawrec-big] quit requested from stdin\n");
             fflush(stdout);
             app_run = false;
             break;
         }
-        if (input == EOF)
-        {
-            clearerr(stdin);
-            usleep(10000);
-            continue;
-        }
+        if (count < 0 && errno != EAGAIN && errno != EINTR) break;
         usleep(10000);
     }
 
+    fcntl(STDIN_FILENO, F_SETFL, stdin_flags);
     return NULL;
 }
 
@@ -1276,10 +1349,12 @@ void getFileNames(char *path, std::vector<std::string>& files)
 
 int main(int argc, char *argv[])
 {
-    printf("[lawrec] build media-playback-dev " __DATE__ " " __TIME__ "\n");
+
+    printf("[lawrec] build touch-ui-lckfb-27m-4lane " __DATE__ " " __TIME__ "\n");
     struct sigaction sa;
     k_s32 mapi_ret = kd_mapi_sys_init();
     printf("[lawrec-big] mapi server init ret=%d\n", mapi_ret);
+    if (mapi_ret != 0) return 1;
 
     bool rtsp_requested = lawrec_rtsp_requested(argc, argv);
 
@@ -1314,6 +1389,24 @@ int main(int argc, char *argv[])
     pthread_t exit_thread_handle;
     // pthread_t key_opreation_handle;
     pthread_t ipc_message_handle;
+    bool ipc_thread_started = false, exit_thread_started = false;
+    int application_error = 0;
+    auto stop_business_threads = [&]() {
+        g_preview.SetBackendReady(false);
+        app_run.store(false); quit.store(false);
+        if (ipc_thread_started) {
+            g_ipc_server.Stop();
+            pthread_join(ipc_message_handle, NULL);
+            int result = kd_ipcmsg_del_service(LAWREC_IPC_SERVICE_NAME);
+            printf("[lawrec-big] ipc shutdown done result=%d\n", result);
+            ipc_thread_started = false;
+        }
+        if (exit_thread_started) {
+            pthread_join(exit_thread_handle, NULL);
+            printf("[lawrec-big] exit thread joined\n");
+            exit_thread_started = false;
+        }
+    };
 
     size_t size = CHANNEL * ISP_CHN1_HEIGHT * ISP_CHN1_WIDTH;
 
@@ -1342,12 +1435,21 @@ int main(int argc, char *argv[])
     {
         mf = std::make_unique<MobileFace>((const char*)argv[2], CHANNEL, ISP_CHN1_HEIGHT, ISP_CHN1_WIDTH);
     }
-    if (lawrec_start_ipc_server(&ipc_message_handle) != 0)
+    ret = lawrec_start_ipc_server(&ipc_message_handle);
+    if (ret != 0)
     {
-        printf("[lawrec] start ipc server failed\n");
+        application_error = ret;
+        printf("[lawrec] start ipc server failed result=%d\n", ret);
         goto app_error;
     }
-    pthread_create(&exit_thread_handle, NULL, exit_app, NULL);
+    ipc_thread_started = !LAWREC_STAGE0_PREVIEW_ONLY;
+    ret = pthread_create(&exit_thread_handle, NULL, exit_app, NULL);
+    if (ret) {
+        application_error = ret;
+        printf("[lawrec-big] exit thread create failed result=%d\n", ret);
+        goto app_error;
+    }
+    exit_thread_started = true;
     // pthread_create(&key_opreation_handle, NULL, Get_KeyValue, NULL);
     // sample_vo_init();
     // sample_sys_bind_init();
@@ -1357,15 +1459,23 @@ int main(int argc, char *argv[])
         goto vb_init_error;
     }
 
-    pthread_create(&vo_thread_handle, NULL, sample_vo_thread, NULL);
+    ret = pthread_create(&vo_thread_handle, NULL, sample_vo_thread, NULL);
+    if (ret) {
+        printf("[lawrec-display] VO thread create error=%d\n", ret);
+        goto dma_init_error;
+    }
     TEST_TIME(ret = sample_vivcap_init(),"sample_vicap_init");
     pthread_join(vo_thread_handle, NULL);
+    if (!ret && g_vo_init_result) ret = g_vo_init_result;
     if(ret) {
+        printf("[lawrec] capture/display init failed=%d; preview remains unavailable\n", ret);
         goto vicap_init_error;
     }
-    lawrec_preview_blank_init();
-    g_preview.SetBackendReady(true);
+    if (lawrec_preview_blank_init() != 0)
+        printf("[lawrec-preview] idle blank unavailable; capture/display readiness checked separately\n");
     lawrec_preview_force_unbind();
+    /* Publish readiness only after idle setup, otherwise an enter can be undone. */
+    g_preview.SetBackendReady(true);
     printf("[lawrec] preview backend ready, bind=%d enabled=%d\n",
            (int)g_preview.Bound(), (int)g_preview.Enabled());
     if (rtsp_requested)
@@ -1396,14 +1506,14 @@ int main(int argc, char *argv[])
 
     if (LAWREC_STAGE0_PREVIEW_ONLY)
     {
-        while (app_run)
+        while (lawrec_app_running())
         {
             usleep(10000);
         }
         goto app_exit;
     }
 
-    while(app_run)
+    while(lawrec_app_running())
     {
         /* Keep preview idle cheap when UI has not requested camera output. */
         if (!g_preview.Enabled() && sensor_process == true)
@@ -1414,6 +1524,8 @@ int main(int argc, char *argv[])
             usleep(10000);
             continue;
         }
+        if (!preview_was_enabled && g_preview.Enabled() && !lawrec_ai_pipeline_enabled())
+            g_preview.ProbeFrame();
         preview_was_enabled = g_preview.Enabled();
 
         if(sensor_process == true)
@@ -1423,7 +1535,7 @@ int main(int argc, char *argv[])
 
             int num = 0;
             memset(&dump_info, 0 , sizeof(k_video_frame_info));
-            if (!app_run)
+            if (!lawrec_app_running())
             {
                 break;
             }
@@ -1641,6 +1753,8 @@ int main(int argc, char *argv[])
         }
     }
 app_exit:
+    stop_business_threads();
+    printf("[lawrec-big] shutdown requested signal=%d\n", (int)g_stop_signal);
     g_rtsp_compat.StopRequested();
     if (lawrec_face_db_enabled())
     {
@@ -1653,20 +1767,8 @@ app_exit:
             munmap(mem_feature_data, LAWREC_FACE_DATA_SIZE);
         }
     }
-    pthread_join(exit_thread_handle, NULL);
-    printf("[lawrec-big] exit thread joined\n");
     fflush(stdout);
     // pthread_join(key_opreation_handle, NULL);
-    if (!LAWREC_STAGE0_PREVIEW_ONLY)
-    {
-        printf("[lawrec-big] ipc shutdown begin\n");
-        fflush(stdout);
-        kd_ipcmsg_disconnect(s32Id1);
-        pthread_join(ipc_message_handle, NULL);
-        kd_ipcmsg_del_service(LAWREC_IPC_SERVICE_NAME);
-        printf("[lawrec-big] ipc shutdown done\n");
-        fflush(stdout);
-    }
     if (vicap_install_osd == 1)
     {
         vo_osd_release_block();
@@ -1688,13 +1790,14 @@ app_exit:
     ret = kd_mpi_vicap_deinit(vicap_dev);
     if (ret) {
         printf("sample_vicap, kd_mpi_vicap_deinit failed.\n");
-        return ret;
+        if (!application_error) application_error = ret;
     }
-    lawrec_preview_blank_deinit();
     printf("[lawrec-big] vicap stop done\n");
     fflush(stdout);
 
 vicap_init_error:
+    if (ret && !application_error) application_error = ret;
+    stop_business_threads();
     kd_mpi_vo_disable_video_layer(K_VO_LAYER1);
 
 
@@ -1709,28 +1812,33 @@ vicap_init_error:
     vo_mpp_chn.chn_id = K_VO_DISPLAY_CHN_ID1;
 
     sample_vicap_unbind_vo(vicap_mpp_chn, vo_mpp_chn);
+    /* Release idle storage only after the video layer can no longer scan it. */
+    lawrec_preview_blank_deinit();
 
     usleep(1000 * display_ms);
 dma_init_error:
+    if (ret && !application_error) application_error = ret;
+    stop_business_threads();
     printf("[lawrec-big] vb exit begin\n");
     fflush(stdout);
     ret = kd_mpi_vb_exit();
     if (ret) {
         printf("fastboot_app, kd_mpi_vb_exit failed.\n");
-        return ret;
+        if (!application_error) application_error = ret;
     }
     printf("[lawrec-big] vb exit done\n");
     fflush(stdout);
 
 app_error:
+    if (ret && !application_error) application_error = ret;
+    stop_business_threads();
     printf("[lawrec-big] mapi sys deinit begin\n");
     fflush(stdout);
     kd_mapi_sys_deinit();
     printf("[lawrec-big] app exit done\n");
     fflush(stdout);
-    return 0;
+    return application_error ? 1 : 0;
 
 vb_init_error:
-    kd_mapi_sys_deinit();
-    return 0;
+    goto app_error;
 }

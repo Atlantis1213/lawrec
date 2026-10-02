@@ -2,6 +2,7 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <signal.h>
 #include <cerrno>
@@ -12,13 +13,18 @@
 extern char **environ;
 
 int lawrec_process_run(const char *path, char *const argv[], unsigned timeout_ms,
-                       const std::atomic<bool> &cancel, const char *log_path)
+                       const std::atomic<bool> &cancel, const char *log_path, bool own_group)
 {
     if (!path || path[0] != '/' || !argv || !argv[0] || !timeout_ms || !log_path)
         return -EINVAL;
     if (cancel.load()) return -ECANCELED;
-    int fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
+    int fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
     if (fd < 0) return -errno;
+    struct stat st{};
+    int error = fstat(fd, &st) ? -errno : 0;
+    if (!error && (!S_ISREG(st.st_mode) || st.st_uid != geteuid())) error = -EPERM;
+    if (!error && fchmod(fd, 0600)) error = -errno;
+    if (error) { close(fd); return error; }
     if (fd < 3) {
         int safe_fd = fcntl(fd, F_DUPFD_CLOEXEC, 3);
         int error = errno;
@@ -39,7 +45,7 @@ int lawrec_process_run(const char *path, char *const argv[], unsigned timeout_ms
     if (!(ret = posix_spawnattr_setpgroup(&attr, 0)) &&
         !(ret = posix_spawnattr_setsigmask(&attr, &mask)) &&
         !(ret = posix_spawnattr_setsigdefault(&attr, &defaults)) &&
-        !(ret = posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF)) &&
+        !(ret = posix_spawnattr_setflags(&attr, (own_group ? POSIX_SPAWN_SETPGROUP : 0) | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF)) &&
         !(ret = posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)) &&
         !(ret = posix_spawn_file_actions_adddup2(&actions, fd, 1)))
         ret = posix_spawn_file_actions_adddup2(&actions, fd, 2);
@@ -64,9 +70,9 @@ int lawrec_process_run(const char *path, char *const argv[], unsigned timeout_ms
     }
     ret = cancel.load() ? -ECANCELED : -ETIMEDOUT;
     // Do not signal unrelated clients. pid is unreaped and owns this group.
-    kill(-pid, SIGTERM);
+    kill(own_group ? -pid : pid, SIGTERM);
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    kill(-pid, SIGKILL);
+    kill(own_group ? -pid : pid, SIGKILL);
     while (waitpid(pid, &status, 0) < 0) {
         if (errno != EINTR) break;
     }

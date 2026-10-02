@@ -56,13 +56,36 @@ int main(void)
     assert(!data.continue_reading);
     assert(touchpad_scale_axis(0, 0, 479, 480) == 0);
     assert(touchpad_scale_axis(240, 0, 479, 480) == 240);
+    input_map_config(MAP_MODE_LCKFB_REFLECT_X, 480, 800);
+    const int raw_x[] = {0, 240, 479};
+    const int raw_y[] = {0, 400, 799};
+    for (int i = 0; i < 3; ++i) {
+        event(fds[1], EV_ABS, ABS_X, raw_x[i]);
+        event(fds[1], EV_ABS, ABS_Y, raw_y[i]);
+        event(fds[1], EV_KEY, BTN_TOUCH, 1);
+        event(fds[1], EV_SYN, SYN_REPORT, 0);
+        event(fds[1], EV_KEY, BTN_TOUCH, 0);
+        event(fds[1], EV_SYN, SYN_REPORT, 0);
+        touchpad_read(NULL, &data);
+        assert(data.state == LV_INDEV_STATE_PR);
+        assert(data.point.x == 479 - raw_x[i] && data.point.y == raw_y[i]);
+        touchpad_read(NULL, &data);
+        assert(data.state == LV_INDEV_STATE_REL);
+        assert(data.point.x == 479 - raw_x[i] && data.point.y == raw_y[i]);
+    }
     event(fds[1], EV_SYN, SYN_DROPPED, 0);
     event(fds[1], EV_KEY, BTN_TOUCH, 1);
     event(fds[1], EV_SYN, SYN_REPORT, 0);
     touchpad_read(NULL, &data);
     assert(resets == 1 && data.state == LV_INDEV_STATE_REL);
     assert(touch_wait_release); /* Pipe cannot supply an ioctl snapshot. */
-    close(fds[0]); close(fds[1]);
-    puts("Touch: short press preserved, identity mapping, dropped-frame cancellation passed");
+    close(fds[1]);
+    touchpad_read(NULL, &data);
+    assert(touchpad_evdev.evdev_fd == -1);
+    assert(resets == 2 && data.state == LV_INDEV_STATE_REL);
+    assert(!data.continue_reading);
+    touchpad_read(NULL, &data);
+    assert(touchpad_evdev.evdev_fd == -1 && data.state == LV_INDEV_STATE_REL);
+    puts("Touch: short press, mapping, dropped-frame and disconnect cancellation passed");
     return 0;
 }

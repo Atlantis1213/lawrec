@@ -65,8 +65,8 @@ public:
 
     void DeInit() {
         Stop();
-        for (int i = 0; i < session_num_; ++i)
-            if (session_created_[i] || (i == 0 && audio_created_)) DestroySession(i);
+        for (int i = 0; i < session_num_ && i < MAX_SESSION_NUM; ++i)
+            if (session_created_[i] || HasSessionResources(i)) DestroySession(i);
         if (init_ok_)
             StreamingPlayerDeinit();
         if (rtspServer_ != nullptr) {
@@ -88,7 +88,7 @@ public:
 
     int Start();
     unsigned long FrameCount() const;
-    bool Overflowed() const;
+    int DeliveryError() const;
     int CleanupError() const { return cleanup_error_; }
 
     void Stop();
@@ -96,11 +96,13 @@ public:
     int InitResult() const { return init_ret_; }
 
 private:
+    bool HasSessionResources(int session_idx) const;
     int CreateVideoEncode(const SessionAttr &session_attr);
     int StreamingPlayerInit();
     int StreamingPlayerDeinit();
     int createSubSession(ServerMediaSession *sms, const SessionAttr &session_attr);
     void announceStream(ServerMediaSession* sms, char const* streamName);
+    void LogDiagnostics(const char *phase);
 
     int video_width_;
     int video_height_;

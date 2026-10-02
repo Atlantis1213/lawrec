@@ -28,6 +28,12 @@
 #define LAWREC_RTSP_DEFAULT_HEIGHT 720
 #define LAWREC_RTSP_DEFAULT_AUDIO_INPUT 0
 
+/* The big-core VB pool and little-core VENC request must use identical blocks. */
+#define LAWREC_VENC_STREAM_BUFFER_COUNT 30U
+#define LAWREC_VENC_STREAM_BUFFER_SIZE \
+    ((LAWREC_RTSP_DEFAULT_WIDTH * LAWREC_RTSP_DEFAULT_HEIGHT * 3U / 4U + 4095U) & ~4095U)
+#define LAWREC_CAPTURE_BUFFER_COUNT 5U
+
 #define LAWREC_RECORD_DEFAULT_OUTPUT_DIR "/sharefs/lawrec_records"
 #define LAWREC_RECORD_DEFAULT_PREFIX "lawrec"
 

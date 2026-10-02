@@ -21,6 +21,7 @@ LawrecPreviewController::LawrecPreviewController()
     : backend_ready_(false),
       enabled_(false),
       bound_(false),
+      blank_pool_id_(VB_INVALID_POOLID),
       blank_block_(VB_INVALID_HANDLE),
       blank_vaddr_(NULL)
 {
@@ -49,8 +50,10 @@ int LawrecPreviewController::InsertBlankFrameLocked(const char *tag)
 {
     int ret;
 
-    if (blank_vaddr_ == NULL)
+    if (blank_vaddr_ == NULL) {
+        printf("[lawrec-preview] %s blank unavailable; no idle frame inserted\n", tag);
         return 0;
+    }
 
     ret = kd_mpi_vo_chn_insert_frame(K_VO_LAYER1, &blank_vf_);
     if (ret != 0)
@@ -76,9 +79,23 @@ int LawrecPreviewController::InitBlankFrame()
 
     y_size = LAWREC_PREVIEW_WIDTH * LAWREC_PREVIEW_HEIGHT;
     uv_size = y_size / 2;
-    blank_block_ = kd_mpi_vb_get_block(VB_INVALID_POOLID, y_size + uv_size, NULL);
+    /* A persistent idle frame must not compete with VICAP/VENC common pools. */
+    k_vb_pool_config pool = {};
+    pool.blk_cnt = 1;
+    pool.blk_size = (y_size + uv_size + 4095) & ~4095;
+    pool.mode = VB_REMAP_MODE_NOCACHE;
+    blank_pool_id_ = kd_mpi_vb_create_pool(&pool);
+    if (blank_pool_id_ == VB_INVALID_POOLID) {
+        printf("[lawrec-preview] blank pool create failed bytes=%llu\n",
+               (unsigned long long)pool.blk_size);
+        return -1;
+    }
+    blank_block_ = kd_mpi_vb_get_block(blank_pool_id_, y_size + uv_size, NULL);
     if (blank_block_ == VB_INVALID_HANDLE) {
-        printf("[lawrec] preview blank get block failed\n");
+        printf("[lawrec-preview] blank get block failed pool=%u bytes=%d\n",
+               blank_pool_id_, y_size + uv_size);
+        kd_mpi_vb_destory_pool(blank_pool_id_);
+        blank_pool_id_ = VB_INVALID_POOLID;
         return -1;
     }
 
@@ -87,6 +104,8 @@ int LawrecPreviewController::InitBlankFrame()
         printf("[lawrec] preview blank phys addr failed\n");
         kd_mpi_vb_release_block(blank_block_);
         blank_block_ = VB_INVALID_HANDLE;
+        kd_mpi_vb_destory_pool(blank_pool_id_);
+        blank_pool_id_ = VB_INVALID_POOLID;
         return -1;
     }
 
@@ -95,6 +114,8 @@ int LawrecPreviewController::InitBlankFrame()
         printf("[lawrec] preview blank mmap failed\n");
         kd_mpi_vb_release_block(blank_block_);
         blank_block_ = VB_INVALID_HANDLE;
+        kd_mpi_vb_destory_pool(blank_pool_id_);
+        blank_pool_id_ = VB_INVALID_POOLID;
         return -1;
     }
 
@@ -121,6 +142,10 @@ void LawrecPreviewController::DeinitBlankFrame()
     kd_mpi_vb_release_block(blank_block_);
     blank_vaddr_ = NULL;
     blank_block_ = VB_INVALID_HANDLE;
+    int ret = kd_mpi_vb_destory_pool(blank_pool_id_);
+    if (ret != 0)
+        printf("[lawrec-preview] blank pool destroy failed pool=%u ret=%d\n", blank_pool_id_, ret);
+    blank_pool_id_ = VB_INVALID_POOLID;
 }
 
 int LawrecPreviewController::Enter(lawrec_preview_bind_fn_t bind_fn)
@@ -133,8 +158,8 @@ int LawrecPreviewController::Enter(lawrec_preview_bind_fn_t bind_fn)
     }
 
     pthread_mutex_lock(&lock_);
-    if (!bound_.load() && bind_fn != NULL) {
-        ret = bind_fn();
+    if (!bound_.load()) {
+        ret = bind_fn != NULL ? bind_fn() : -1;
         if (ret == 0)
             bound_.store(true);
     }
@@ -161,15 +186,51 @@ int LawrecPreviewController::Exit(lawrec_preview_unbind_fn_t unbind_fn)
     }
 
     FillBindChannels(&vicap_mpp_chn, &vo_mpp_chn);
-    if (unbind_fn != NULL)
-        unbind_fn(vicap_mpp_chn, vo_mpp_chn);
+    int ret = unbind_fn != NULL ? unbind_fn(vicap_mpp_chn, vo_mpp_chn) : -1;
+    if (ret != 0) {
+        /* Keep ownership truthful so the next stop can retry the failed unbind. */
+        pthread_mutex_unlock(&lock_);
+        printf("[lawrec] preview exit unbind failed ret=%d bound=1\n", ret);
+        return ret;
+    }
     bound_.store(false);
-    InsertBlankFrameLocked("preview exit");
+    ret = InsertBlankFrameLocked("preview exit");
     pthread_mutex_unlock(&lock_);
 
     printf("[lawrec] preview exit done enabled=%d bound=%d\n",
            (int)enabled_.load(), (int)bound_.load());
-    return 0;
+    return ret;
+}
+
+void LawrecPreviewController::ProbeFrame()
+{
+    /* One bounded probe per observed entry, on the main loop, never in IPC.
+     * Binding succeeds even when no camera frames are being produced. */
+    k_video_frame_info frame;
+    memset(&frame, 0, sizeof(frame));
+    k_vicap_chn channel = VICAP_CHN_ID_0;
+    int ret = kd_mpi_vicap_dump_frame(VICAP_DEV_ID_0, channel,
+                                    VICAP_DUMP_YUV, &frame, 500);
+    if (ret != 0) {
+        printf("[lawrec-preview] frame probe chn=0 ret=%d hex=0x%08x; checking encode feed\n",
+               ret, (unsigned)ret);
+        // A bound display may consume CHN0. Check CHN1 separately so a display
+        // dump timeout is not mistaken for proof that the entire sensor is idle.
+        channel = VICAP_CHN_ID_1;
+        ret = kd_mpi_vicap_dump_frame(VICAP_DEV_ID_0, channel, VICAP_DUMP_YUV, &frame, 500);
+        if (ret != 0) {
+            printf("[lawrec-preview] frame probe failed chn=1 ret=%d hex=0x%08x; inspect capture startup/sensor\n",
+                   ret, (unsigned)ret);
+            return;
+        }
+    }
+    printf("[lawrec-preview] frame chn=%d size=%ux%u format=%d stride=%u pts=%llu phys=0x%llx\n",
+           channel, frame.v_frame.width, frame.v_frame.height, (int)frame.v_frame.pixel_format,
+           frame.v_frame.stride[0], (unsigned long long)frame.v_frame.pts,
+           (unsigned long long)frame.v_frame.phys_addr[0]);
+    ret = kd_mpi_vicap_dump_release(VICAP_DEV_ID_0, channel, &frame);
+    if (ret != 0)
+        printf("[lawrec-preview] frame release failed chn=%d ret=%d\n", channel, ret);
 }
 
 void LawrecPreviewController::ForceUnbindAtStartup(lawrec_preview_unbind_fn_t unbind_fn)
@@ -207,4 +268,13 @@ bool LawrecPreviewController::Enabled() const
 bool LawrecPreviewController::Bound() const
 {
     return bound_.load();
+}
+
+void LawrecPreviewController::Snapshot(bool *ready, bool *enabled, bool *bound)
+{
+    pthread_mutex_lock(&lock_);
+    *ready = backend_ready_.load();
+    *enabled = enabled_.load();
+    *bound = bound_.load();
+    pthread_mutex_unlock(&lock_);
 }

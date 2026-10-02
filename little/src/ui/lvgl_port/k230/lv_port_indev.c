@@ -43,6 +43,8 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/time.h>
+#include <stdint.h>
+#include <time.h>
 #include <unistd.h>
 
 /*********************
@@ -110,6 +112,15 @@ static int map_height = 1280;
 static FILE *touch_trace_fp;
 static bool touch_sync_lost;
 static bool touch_wait_release;
+static uint64_t touch_retry_ms;
+
+static uint64_t touch_monotonic_ms(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return 0;
+    return (uint64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
 
 /**********************
  *      MACROS
@@ -155,7 +166,10 @@ static void touchpad_init(void)
 
     if (evdev_fd != -1)
         close(evdev_fd);
+    memset(&touchpad_evdev, 0, sizeof(touchpad_evdev));
     touchpad_evdev.evdev_fd = -1;
+    touch_sync_lost = false;
+    touch_wait_release = false;
 
     evdev_fd = touchpad_open_device();
     if (evdev_fd == -1) {
@@ -220,6 +234,21 @@ static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
         data->state = LV_INDEV_STATE_REL;
         data->point.x = 0;
         data->point.y = 0;
+        uint64_t now = touch_monotonic_ms();
+        if (now >= touch_retry_ms) {
+            touch_retry_ms = now + 1000;
+            touchpad_init();
+            if (touchpad_evdev.evdev_fd >= 0) {
+                /* A rebind invalidates the old fd. Do not restart DRM or turn
+                 * a finger already held during reconnect into a fresh click. */
+                unsigned char keys[(KEY_MAX + 8) / 8] = {0};
+                touch_wait_release = !touchpad_evdev.use_abs_xy ||
+                    ioctl(touchpad_evdev.evdev_fd, EVIOCGKEY(sizeof(keys)), keys) < 0 ||
+                    (keys[BTN_TOUCH / 8] & (1U << (BTN_TOUCH % 8)));
+                fprintf(stderr, "lawrec indev: reconnected %s wait_release=%d\n",
+                        touchpad_evdev.devname, touch_wait_release);
+            }
+        }
         return;
     }
 
@@ -227,13 +256,19 @@ static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
         int rbytes = read(evdev_fd, &in, sizeof(in));
         if (rbytes < 0 && errno == EINTR)
             continue;
-        if (rbytes < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-            fprintf(stderr, "lawrec indev: read failed errno=%d device=%s\n",
-                    errno, touchpad_evdev.devname);
+        if (rbytes == 0 ||
+            (rbytes < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+            fprintf(stderr, "lawrec indev: device disconnected errno=%d device=%s; retry in 1s\n",
+                    rbytes == 0 ? 0 : errno, touchpad_evdev.devname);
             close(evdev_fd);
             touchpad_evdev.evdev_fd = -1;
-            evdev_button = LV_INDEV_STATE_REL;
-            break;
+            touch_retry_ms = touch_monotonic_ms() + 1000;
+            /* Cancel before returning REL: removal is not a user release. */
+            lv_indev_reset(lv_indev_get_act(), NULL);
+            data->state = LV_INDEV_STATE_REL;
+            data->point.x = evdev_root_x;
+            data->point.y = evdev_root_y;
+            return;
         }
         if (rbytes < (int)sizeof(in))
             break;
@@ -651,9 +686,7 @@ static void touch_trace_open(void)
     const char *enable;
 
     if (touch_trace_fp != NULL)
-        fclose(touch_trace_fp);
-
-    touch_trace_fp = NULL;
+        return;
 
     enable = getenv("LAWREC_TOUCH_TRACE");
     if (enable == NULL || strcmp(enable, "1") != 0)
