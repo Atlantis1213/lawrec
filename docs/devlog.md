@@ -89,3 +89,50 @@ Offline development only. No hardware acceptance has been performed for this rep
   delivery, KPU, OSD scanout/blending, vblank events and preview remain unverified.
 - Next: one shared H.264/G.711A source and bounded independent RTSP/MP4 queues;
   real media, final page rendering and deployment bundle remain unfinished.
+
+### 2026-10-03: Shared Encoder/Audio And Bounded Consumers
+
+- Changes: one process-lifetime MediaSource owns VENC0 (VI CHN2 YUV) and
+  mono-right inner-codec AI/AENC0. First subscriber starts both codecs; last
+  subscriber stops/releases them. Two independent video/audio queue pairs share
+  immutable copied frames. Control buttons remain explicitly ENOSYS until real
+  RTSP/MP4 workers exist; no fake streaming or recording states were added.
+- Media: H264/1280x720/30 FPS/4000 kbps/GOP30; G711A/8000/mono/320 samples.
+  Validate pack count/length, complete Annex-B access units, headers and monotonic
+  per-track PTS. Cache SPS/PPS and make joining IDRs self-contained. Source counters
+  measure received callbacks, not network/file success. VENC callback bound is
+  1 MiB, matching SDK read_venc_data; each consumer video queue 90 frames/8 MiB,
+  audio 100 packets/128 KiB. Live overflow resets a whole GOP and schedules IDR
+  outside callback locks; record overflow fails only that consumer.
+- Timing evidence: SDK sample_audio _test_aenc_timestamp explicitly logs us;
+  SDK mp4_format divides input time_stamp by 1000. Keep source timestamps in us,
+  one wall-clock mapping for both RTSP tracks, and 125-us G711A sample clipping.
+  Actual AV alignment and first-sample PTS interpretation are not proven offline.
+- Ownership: only initialize Linux MAPI client and its existing readiness flag,
+  never remote media/VB. Callback data is copied before the SDK unmaps it.
+  SDK stop/unregister/deinit run outside the delivery lock; retain flags and
+  first cleanup error if release fails, reject new owners and avoid destructing
+  a potentially live SDK callback target at service exit.
+- SDK detail: VENC init creates a local FIFO even after a failed remote init;
+  AENC start creates its local reader before checking remote START. Track these
+  attempts and perform cleanup. SDK itself has unchecked pthread_create/FIFO/mmap
+  returns and some overwritten internal errors; application checks cannot prove
+  those internal paths safe. No SDK/kernel sources were modified. Real consumers
+  still need first-frame deadlines and explicit worker error feedback.
+- Validation: Docker `bash tools/build.sh little`, `test`, `verify` passed.
+  Source fixture checks one codec initialization for two owners, CHN2/mono params,
+  immutable copies, independent dequeues, header/IDR recovery, malformed and startup
+  callback errors, partial-start cleanup, positive SDK errors and stop-failure
+  retention. Stop fixture joins a callback thread to catch lock-order deadlocks
+  (10-second test-only deadline). Pure frame/time test checks bounds, GOP recovery,
+  finish/discard, independent failures, RTP epoch mapping and audio clipping.
+  Logs: out/build-source-final.log, out/test-source-final.log, out/verify-source.log.
+  An initial subword atomic-exchange link error was removed by using a word-sized
+  IDR flag; no new libatomic/runtime dependency. Initial rebuild had transient
+  make clock-skew warnings; final build completed without them.
+- Remaining: SDK ELF section-table warning persists; verify still checks header
+  predicates and frozen source hashes, not loader compatibility. No board, network,
+  kernel, model or touch changes. Actual codec/audio callbacks and simultaneous
+  AI/encode/preview operation remain unverified. This is not a deployable full Demo.
+- Next: live555 RTSP and MP4 worker consumers, wire their asynchronous operations
+  and measured stats into service/UI, then render/package for final board acceptance.

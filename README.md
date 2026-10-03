@@ -9,7 +9,8 @@ Three-channel camera/preview, single MobileRetinaFace AI2D/KPU integration,
 face decoding/OSD, SDK control IPC and a single asynchronous LVGL page now
 cross-compile. **All hardware operation remains unverified.**
 `media_service` forwards preview/AI/status to vision. RTSP/record still return
-`-ENOSYS`: shared H.264/G.711A, live555 and MP4 integration is not finished.
+`-ENOSYS`: the shared H.264/G.711A source now compiles, but live555 and MP4
+consumers/control integration is not finished.
 `--mock SOCKET` is exclusively an offline control fixture; never deploy it as media.
 
 ## Ownership
@@ -86,3 +87,36 @@ are pending board acceptance. Neither OSD nor UI reinitializes the panel.
 UI operation failures persist across passive polling; asynchronous vision errors
 are not replaced with zero by the service. Successful polling is not evidence
 of frame readiness, and unavailable codec operations never claim success.
+
+## Shared Media Source
+
+`MediaSource` starts VENC0 from YUV CHN2 and inner-codec mono-right AI/AENC0
+only for the first subscriber. The last subscriber releases codecs; it never
+reinitializes vision's camera/VB. Linux MAPI's existing workaround sets its
+client-ready flag only; media_init/media_deinit must not reset remote pools.
+
+H.264 is 1280x720/30 FPS/4000 kbps with a 30-frame GOP. G.711A is 8 kHz mono,
+320 samples per packet (40 ms). I2S uses two physical slots with mono-right
+selection, not a stereo output track. SDK buffer data is copied before returning
+from callbacks. A complete access unit and its PTS are shared as immutable data
+between separate RTSP and recorder video/audio queues, never one competing queue.
+
+Each video queue is limited to 90 frames/8 MiB; audio to 100 packets/128 KiB.
+RTSP congestion drops complete queued access units and waits for SPS/PPS/IDR;
+IDR requests run outside callbacks. Record overflow reports an error rather
+than silently dropping frames. A slow consumer cannot close the other queue.
+Queues distinguish finishing accepted tails from immediate discard.
+
+The SDK reader only calls back with at most 1 MiB of video data; the application
+matches that bound and caches bounded SPS/PPS. Packet lengths/counts, access-unit
+structure and per-track monotonic PTS are checked. RTP mapping uses a single
+audio/video epoch; recorder helpers clip G.711A on exact 125-us sample boundaries.
+These are offline logic checks. Clock alignment, first-sample audio PTS semantics,
+packet lengths and actual concurrent CHN2/AI audio delivery remain board gates.
+
+Source teardown calls SDK outside callback locks. Partial SDK initialization is
+tracked where the SDK starts a local reader/FIFO before reporting remote failure.
+An unconfirmed cleanup prevents a new subscription; service shutdown exits without
+destroying a callback owner still potentially referenced by SDK threads. This is
+basic resource safety, not reconnect/recovery. Source counters describe received
+callbacks, not received RTP or completed MP4 writes.

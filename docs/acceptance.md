@@ -8,6 +8,8 @@
 - [x] AI2D/KPU SDK integration cross-build; model head checks, priors, NMS and coordinates.
 - [x] SDK IPC cross-build; malformed bodies, pending command/ACK and retained errors fixture.
 - [x] OSD cross-build; buffer retention on failed enable/disable fixture.
+- [x] VENC/AENC real API cross-build; callback copying, separate consumer queues,
+  GOP recovery, first/last ownership and cleanup fixture; shared PTS/clip logic.
 - [ ] Independent queues, first/last source ownership, PTS and MP4 close checks.
 - [ ] Real live555/library/sample stream checks and single-page LVGL rendering.
 - [ ] Commit-based application package, ELF/library/model hashes and startup scripts.
@@ -20,6 +22,8 @@ reverse order, finishing the recorder before releasing codecs/camera.
 - [ ] GC2093 frames and LCD preview; existing touch remains correct.
 - [ ] AI face boxes/landmarks/count on LCD; AI switch does not stop encoding.
 - [ ] VLC H.264 + G.711A at rtsp://<board-ip>:8554/lawrec.
+- [ ] Audio packets match mono 8 kHz/320 bytes/40 ms; video/audio SDK clocks align,
+  source PTS identifies the first audio sample, and CHN2 feeds VENC while RGB AI runs.
 - [ ] 10-20 second MP4 plays with sound on a computer after normal stop.
 - [ ] Preview + AI + RTSP + record together; stopping one consumer leaves others alive.
 - [ ] Measured AI2D/KPU/post/total latency, AI FPS, bitrate, queues, CPU/RSS/VB.

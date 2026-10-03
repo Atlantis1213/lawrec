@@ -5,7 +5,8 @@ set(SDK "$ENV{K230_SDK_ROOT}")
 set(CDK "${SDK}/src/common/cdk/user")
 set(MPP "${SDK}/src/big/mpp")
 set(LVGL_ROOT "$ENV{LVGL_ROOT}")
-add_executable(media_service media/main.cpp media/vision_client.cpp)
+add_executable(media_service media/main.cpp media/vision_client.cpp
+    media/source.cpp media/source_frames.cpp ../common/frame.cpp ../common/frame_queue.cpp)
 target_compile_options(media_service PRIVATE -Wall -Wextra)
 target_include_directories(media_service PRIVATE ../common
     "${MPP}/include" "${MPP}/include/comm" "${MPP}/userapps/api"

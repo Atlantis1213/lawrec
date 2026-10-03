@@ -2,6 +2,7 @@
 #include "protocol.h"
 #ifndef DEMO_SOCKET_FIXTURE
 #include "vision_client.h"
+#include "source.h"
 #endif
 #include <cerrno>
 #include <csignal>
@@ -58,10 +59,14 @@ int main(int argc, char **argv) {
     int backend_error = -ENOSYS;
 #ifndef DEMO_SOCKET_FIXTURE
     demo::VisionClient vision;
+    demo::MediaSource source;
     if (!mock) backend_error = vision.start();
 #endif
     std::fprintf(stderr, "[media] mode=%s socket=%s backend_init=%d\n", mock ? "MOCK, no hardware" : "vision IPC, codecs pending", path, backend_error);
     while (running) {
+#ifndef DEMO_SOCKET_FIXTURE
+        source.tick();
+#endif
         pollfd listener{server, POLLIN, 0};
         if (poll(&listener, 1, 100) <= 0) continue;
         int client = accept4(server, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
@@ -98,8 +103,13 @@ int main(int argc, char **argv) {
     }
     close(server); unlink(path); close(lock);
 #ifndef DEMO_SOCKET_FIXTURE
+    int media_cleanup = source.shutdown();
     int cleanup = vision.stop();
     if (cleanup) std::fprintf(stderr, "[media] IPC shutdown failed=%d\n", cleanup);
+    if (media_cleanup) {
+        std::fprintf(stderr, "[media] SDK cleanup failed=%d; do not destroy callback owner\n", media_cleanup);
+        std::fflush(nullptr); _Exit(1);
+    }
     return cleanup ? 1 : 0;
 #else
     return 0;

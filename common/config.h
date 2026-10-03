@@ -9,6 +9,9 @@ constexpr unsigned video_bitrate_kbps = 4000;
 constexpr unsigned capture_buffers = 5;
 constexpr unsigned stream_buffers = 30;
 constexpr unsigned stream_block_bytes = (video_width * video_height * 3 / 4 + 4095) & ~4095U;
+constexpr unsigned audio_rate = 8000, audio_samples = 320;
+// SDK read_venc_data only forwards callbacks whose total size is <= 1 MiB.
+constexpr unsigned max_access_unit = 1024 * 1024;
 constexpr unsigned rtsp_port = 8554;
 constexpr const char *rtsp_name = "lawrec";
 constexpr const char *ipc_service = "lawrec_demo";

@@ -52,4 +52,14 @@ if [ "$1" = test ]; then
         -I"$MPP/include/comm" -I"$MPP/userapps/api" \
         tests/osd_test.cpp big/osd.cpp common/faces.cpp -o out/tests/osd_test
     out/tests/osd_test
+    c++ -std=c++17 -Wall -Wextra -Werror -pthread -Icommon \
+        tests/frames_test.cpp common/frame.cpp common/frame_queue.cpp -o out/tests/frames_test
+    out/tests/frames_test
+    CDK="$SDK/src/common/cdk/user"
+    c++ -std=c++17 -Wall -Wextra -Werror -pthread -Icommon -Ilittle/media -I"$MPP/include" \
+        -I"$MPP/include/comm" -I"$MPP/userapps/api" -I"$CDK/mapi/include" \
+        -I"$CDK/mapi/include/api" -I"$CDK/mapi/include/comm" \
+        tests/source_test.cpp little/media/source.cpp little/media/source_frames.cpp \
+        common/frame.cpp common/frame_queue.cpp -o out/tests/source_test
+    timeout 10 out/tests/source_test
 fi
