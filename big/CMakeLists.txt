@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(NN "${SDK}/src/big/nncase")
 set(MPP "${SDK}/src/big/mpp")
 set(CDK "${SDK}/src/common/cdk/user")
-add_executable(vision.elf main.cpp)
+add_executable(vision.elf main.cpp camera.cpp)
 target_compile_options(vision.elf PRIVATE -Wall -Wextra -O2 -march=rv64imafdcv -mabi=lp64d -mcmodel=medany)
 target_include_directories(vision.elf PRIVATE ../common
     "${MPP}/include" "${MPP}/include/comm" "${MPP}/userapps/api"
@@ -21,4 +21,8 @@ target_link_directories(vision.elf PRIVATE "${MPP}/userapps/lib"
 target_link_options(vision.elf PRIVATE -static "-T${NN}/examples/cmake/link.lds"
     -march=rv64imafdcv -mabi=lp64d -mcmodel=medany)
 target_link_libraries(vision.elf PRIVATE -Wl,--start-group sys vicap vb vo sensor connector
-    mapi ipcmsg datafifo venc aenc ai ao adec vdec vdss dma dpu rtthread -Wl,--end-group)
+    cam_device cam_engine hal oslayer ebase fpga isp_drv binder auto_ctrol common
+    cam_caldb isi 3a buffer_management cameric_drv video_in virtual_hal start_engine
+    cmd_buffer switch cameric_reg_drv t_database_c t_mxml_c t_json_c t_common_c
+    mapi ipcmsg datafifo venc aenc ai ao adec vdec vdss dma dpu vvi rtthread atomic
+    -Wl,--end-group)

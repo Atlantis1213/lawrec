@@ -5,8 +5,9 @@ Independent implementation of [the development plan](docs/plan.md). The old
 
 ## Current Stage
 
-Repository, fixed-width control protocol, Unix socket mock, Docker cross-build
-and a single LVGL page. **Camera, AI/OSD and real media still need integration.**
+Repository, fixed-width control protocol, Unix socket mock, Docker cross-build,
+three-channel camera/preview implementation and a single LVGL page.
+**AI/OSD, SDK control IPC and real media still need integration.**
 `media_service` returns `-ENOSYS` in normal mode until its hardware backend exists.
 `--mock SOCKET` is exclusively an offline control fixture; never deploy it as media.
 
@@ -27,6 +28,7 @@ are excluded. No automatic deployment, SDK mutation or board connection.
 export K230_SDK_ROOT=/home/atlantis/k230_sdk
 bash tools/build.sh all
 bash tools/build.sh test
+bash tools/build.sh verify
 ```
 
 Uses K230 SDK Docker with networking disabled and SDK mounted read-only.
@@ -46,3 +48,9 @@ Final RTSP URL: `rtsp://<board-ip>:8554/lawrec`. VLC example after acceptance:
 `vlc --rtsp-tcp rtsp://<board-ip>:8554/lawrec`.
 Final record directory: `/sharefs/lawrec_records`. Applications are not yet a
 deployable full pipeline; startup scripts/package/model instructions follow integration.
+
+Camera follows the SDK sample's pre-start VI-to-VO binding order. Preview ON/OFF
+only enables/disables video layer1; the camera binding and RGB/YUV feeds remain
+alive until shutdown. RGB CHN1 explicitly reserves SDK dump output. Existing
+panel/PHY/kernel source and LVGL adapter bytes remain unchanged. This is a
+single candidate, not an automatic fallback pipeline or proven black-screen fix.
