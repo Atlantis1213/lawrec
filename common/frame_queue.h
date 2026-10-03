@@ -24,6 +24,7 @@ public:
     void finish();
     void close();
     void discard();
+    void await_idr();
     int fail(int error);
     QueueStats stats() const;
 private:

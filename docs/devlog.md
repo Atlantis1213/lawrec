@@ -136,3 +136,36 @@ Offline development only. No hardware acceptance has been performed for this rep
   AI/encode/preview operation remain unverified. This is not a deployable full Demo.
 - Next: live555 RTSP and MP4 worker consumers, wire their asynchronous operations
   and measured stats into service/UI, then render/package for final board acceptance.
+
+### 2026-10-03: Real Asynchronous RTSP Consumer
+
+- Changes: feed-backed nonblocking live555 sources, H264/PCMA subsessions and
+  one RTSP worker. The Unix service now dispatches actual RTSP ON/OFF instead of
+  ENOSYS; UI shows asynchronous busy and still allows an active RTSP STOP after
+  a vision polling failure. Record remains ENOSYS until its actual worker exists.
+- Decisions: bind IPv4 8554 before codecs, reject occupied IPv4 even if IPv6
+  could succeed; require an accepted complete IDR/header config and audio within
+  three seconds. SDP uses cached SPS/PPS; static RTP payload 8 means PCMA/8000/mono
+  without requiring an explicit rtpmap line. New track sources resync only live
+  queues and schedule IDR outside callbacks. One reused source per track avoids
+  clients competing for queue frames. No reconnect, retry or touch/kernel changes.
+- Correctness: SDK AUs can contain multiple slices. Override the discrete
+  framer's default every-VCL marker with the exact final-NAL boundary; preserve
+  one AV epoch and source PTS rather than dequeue time. NAL overflow is an error,
+  not truncation. Worker-owned event-loop watch avoids cross-thread live555 calls.
+  Stop closes server/client/source objects before detaching codecs, joins at exit,
+  and retains SDK cleanup errors. Source callback stalls fail after three seconds.
+- Validation: Docker `bash tools/build.sh little`, `test`, `rtsp`, `verify`.
+  Real SDK live555 is built natively in read-only-SDK/network-none Docker, with
+  a narrow synthetic codec adapter. Loopback DESCRIBE/SETUP/PLAY/interleaved RTP
+  checks SDP H264/90000 + PCMA payload 8, exact audio bytes and multislice marker,
+  shared PTS, no NAL truncation, idempotent start, stop/port release, occupied-port
+  failure before codec attach and first-frame deadline. Test execution is seconds,
+  not a soak. Logs: out/build-rtsp.log, out/test-rtsp.log,
+  out/test-rtsp-regression.log, out/verify-rtsp.log.
+- Unverified/risks: synthetic transport is not H264 decoding, VLC acceptance or
+  hardware AV alignment. Camera/preview and DRM vblank on the old board remain
+  unproven; no board was accessed or updated. The previously recorded big ELF
+  section-table warning persists; header/hash verification is not loader acceptance.
+- Next: real MP4 worker from the independent record feed, simultaneous control,
+  metrics, actual LVGL render and a verified application bundle remain required.

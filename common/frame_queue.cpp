@@ -56,6 +56,10 @@ void FrameQueue::close() {
 void FrameQueue::discard() {
     std::lock_guard<std::mutex> guard(lock_); discard_locked();
 }
+void FrameQueue::await_idr() {
+    std::lock_guard<std::mutex> guard(lock_);
+    discard_locked(); waiting_idr_ = video_;
+}
 int FrameQueue::fail(int error) {
     std::lock_guard<std::mutex> guard(lock_);
     if (!stats_.error) stats_.error = error < 0 ? error : -EIO;

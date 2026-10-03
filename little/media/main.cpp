@@ -3,6 +3,7 @@
 #ifndef DEMO_SOCKET_FIXTURE
 #include "vision_client.h"
 #include "source.h"
+#include "rtsp.h"
 #endif
 #include <cerrno>
 #include <csignal>
@@ -60,9 +61,10 @@ int main(int argc, char **argv) {
 #ifndef DEMO_SOCKET_FIXTURE
     demo::VisionClient vision;
     demo::MediaSource source;
+    demo::RtspWorker rtsp(source);
     if (!mock) backend_error = vision.start();
 #endif
-    std::fprintf(stderr, "[media] mode=%s socket=%s backend_init=%d\n", mock ? "MOCK, no hardware" : "vision IPC, codecs pending", path, backend_error);
+    std::fprintf(stderr, "[media] mode=%s socket=%s backend_init=%d\n", mock ? "MOCK, no hardware" : "vision IPC + H264/G711A RTSP", path, backend_error);
     while (running) {
 #ifndef DEMO_SOCKET_FIXTURE
         source.tick();
@@ -83,14 +85,33 @@ int main(int argc, char **argv) {
                     status.flags = request.value ? status.flags | flag : status.flags & ~flag;
                 }
 #ifndef DEMO_SOCKET_FIXTURE
-                if (!mock && !backend_error) {
-                    if (request.command > uint32_t(demo::Command::SetAi)) status.result = -ENOSYS;
-                    else {
+                if (!mock) {
+                    int retained_error = status.last_error;
+                    if (request.command == uint32_t(demo::Command::SetRtsp) && !request.value)
+                        status.result = rtsp.request(false); // STOP never requires a new peer ACK.
+                    else if (request.command == uint32_t(demo::Command::SetRecord)) status.result = -ENOSYS;
+                    else if (!backend_error) {
+                        demo::Request query = request;
+                        if (request.command == uint32_t(demo::Command::SetRtsp)) { query.command = 0; query.value = 0; }
                         demo::Status answer;
-                        int ret = vision.exchange(request, answer);
+                        int ret = vision.exchange(query, answer);
                         if (ret) status.result = ret;
-                        else status = answer;
+                        else {
+                            status = answer;
+                            if (!status.result && request.command == uint32_t(demo::Command::SetRtsp))
+                                status.result = rtsp.request(true);
+                        }
                     }
+                    auto stream = rtsp.status();
+                    status.flags &= demo::Preview | demo::Ai;
+                    if (stream.state == demo::StreamState::Running || stream.state == demo::StreamState::Stopping)
+                        status.flags |= demo::Rtsp;
+                    status.busy &= demo::Preview | demo::Ai;
+                    if (stream.state == demo::StreamState::Starting || stream.state == demo::StreamState::Stopping)
+                        status.busy |= demo::Rtsp;
+                    status.video_queue = stream.video.depth; status.audio_queue = stream.audio.depth;
+                    if (stream.error) status.last_error = stream.error;
+                    if (!status.last_error) status.last_error = retained_error;
                 }
 #endif
                 // Preserve asynchronous vision errors across successful polling.
@@ -103,7 +124,9 @@ int main(int argc, char **argv) {
     }
     close(server); unlink(path); close(lock);
 #ifndef DEMO_SOCKET_FIXTURE
+    int stream_cleanup = rtsp.shutdown();
     int media_cleanup = source.shutdown();
+    if (!media_cleanup) media_cleanup = stream_cleanup;
     int cleanup = vision.stop();
     if (cleanup) std::fprintf(stderr, "[media] IPC shutdown failed=%d\n", cleanup);
     if (media_cleanup) {

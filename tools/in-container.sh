@@ -63,3 +63,8 @@ if [ "$1" = test ]; then
         common/frame.cpp common/frame_queue.cpp -o out/tests/source_test
     timeout 10 out/tests/source_test
 fi
+if [ "$1" = rtsp ]; then
+    cmake -S tests/rtsp -B out/tests/rtsp -DCMAKE_BUILD_TYPE=Debug
+    cmake --build out/tests/rtsp -j "$LAWREC_JOBS"
+    timeout 15 out/tests/rtsp/rtsp_test
+fi

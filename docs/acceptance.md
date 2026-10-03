@@ -10,8 +10,10 @@
 - [x] OSD cross-build; buffer retention on failed enable/disable fixture.
 - [x] VENC/AENC real API cross-build; callback copying, separate consumer queues,
   GOP recovery, first/last ownership and cleanup fixture; shared PTS/clip logic.
+- [x] live555 worker/API cross-build and real SDK loopback DESCRIBE/SETUP/PLAY,
+  interleaved H264 multislice RTP markers/PCMA bytes, PTS/bounds and port/deadline checks.
 - [ ] Independent queues, first/last source ownership, PTS and MP4 close checks.
-- [ ] Real live555/library/sample stream checks and single-page LVGL rendering.
+- [ ] Decodable sample stream/library MP4 checks and single-page LVGL rendering.
 - [ ] Commit-based application package, ELF/library/model hashes and startup scripts.
 
 ## Board Gates (All Pending)

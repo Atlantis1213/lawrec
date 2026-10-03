@@ -17,6 +17,8 @@ int main() {
     demo::Frame video;
     video.bytes = {0,0,0,1,0x67,0x42,0,0x1e,0xaa,0,0,1,0x68,0xce};
     assert(headers.prepare(video) == 0 && !video.key);
+    std::vector<uint8_t> sps, pps;
+    assert(headers.config(sps, pps) && sps[0] == 0x67 && pps[0] == 0x68);
     video.bytes = {0,0,1,0x65,0x88,0,0,0,1,0x65,0x99};
     assert(headers.prepare(video) == 1 && video.key);
     std::vector<demo::Nal> nals;
@@ -43,6 +45,9 @@ int main() {
     assert(record.push(first) == 0 && record.push(frame(false)) == 0);
     assert(record.push(frame(false)) == -ENOBUFS && record.stats().error == -ENOBUFS);
     assert(live.stats().error == 0 && live.pop(out, 0) == 1);
+    live.push(first); live.await_idr();
+    assert(live.push(frame(false)) == 0 && !live.stats().depth);
+    assert(!live.push(first) && live.pop(out, 0) == 1);
     assert(record.pop(out, 0) == -ENOBUFS);
     live.reset(); live.push(first); live.finish();
     assert(live.pop(out, 0) == 1 && live.pop(out, 0) == -ECANCELED);

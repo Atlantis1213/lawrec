@@ -21,6 +21,8 @@ public:
     int tick(); // Performs requested IDR outside callbacks.
     int shutdown();
     SourceStats stats() const;
+    bool h264_config(std::vector<uint8_t> &sps, std::vector<uint8_t> &pps) const;
+    void request_idr() { idr_needed_ = 1; }
 private:
     int start();
     int cleanup();

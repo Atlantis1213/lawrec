@@ -18,6 +18,9 @@ public:
     // 1=VCL frame, 0=parameter-only, negative=invalid stream.
     int prepare(Frame &frame);
     void reset() { sps_.clear(); pps_.clear(); }
+    bool config(std::vector<uint8_t> &sps, std::vector<uint8_t> &pps) const {
+        sps = sps_; pps = pps_; return !sps.empty() && !pps.empty();
+    }
 private:
     std::vector<uint8_t> sps_, pps_;
 };

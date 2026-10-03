@@ -8,9 +8,9 @@ Independent implementation of [the development plan](docs/plan.md). The old
 Three-channel camera/preview, single MobileRetinaFace AI2D/KPU integration,
 face decoding/OSD, SDK control IPC and a single asynchronous LVGL page now
 cross-compile. **All hardware operation remains unverified.**
-`media_service` forwards preview/AI/status to vision. RTSP/record still return
-`-ENOSYS`: the shared H.264/G.711A source now compiles, but live555 and MP4
-consumers/control integration is not finished.
+`media_service` forwards preview/AI/status to vision and runs a real asynchronous
+live555 H.264/G.711A RTSP consumer. Record still returns `-ENOSYS`: the MP4
+consumer is not finished. Loopback RTP tests are not hardware/VLC acceptance.
 `--mock SOCKET` is exclusively an offline control fixture; never deploy it as media.
 
 ## Ownership
@@ -30,6 +30,7 @@ are excluded. No automatic deployment, SDK mutation or board connection.
 export K230_SDK_ROOT=/home/atlantis/k230_sdk
 bash tools/build.sh all
 bash tools/build.sh test
+bash tools/build.sh rtsp
 bash tools/build.sh verify
 ```
 
@@ -120,3 +121,30 @@ An unconfirmed cleanup prevents a new subscription; service shutdown exits witho
 destroying a callback owner still potentially referenced by SDK threads. This is
 basic resource safety, not reconnect/recovery. Source counters describe received
 callbacks, not received RTP or completed MP4 writes.
+
+## RTSP
+
+RTSP ON checks vision availability, then starts an independent worker. It binds
+IPv4 port 8554 before allocating codecs, waits up to three seconds for an accepted
+complete IDR with SPS/PPS and an audio packet, and only then reports running.
+No client is required for running; this state is server/source readiness, not a
+claim of viewer reception. The two tracks reuse one source per track across clients.
+
+The reactor never waits on a codec queue. NALs from the same copied access unit
+retain one PTS; only the final NAL marks an RTP frame end. Both tracks share one
+wall-clock mapping. Oversized NALs fail rather than truncate. New track sources
+discard old live backlog, wait for a fresh IDR and request it outside callbacks.
+Recorder queues are unaffected. SDP uses the source's cached SPS/PPS and static
+PCMA payload 8 (8 kHz mono), without a nested pre-read event loop.
+
+UI shows WAIT while start/stop is pending. STOP does not depend on a fresh vision
+reply; SDK detach runs after live555 clients and objects close. A three-second
+first-frame/stalled-callback deadline and codec/delivery errors report failed.
+Shutdown joins the worker; SDK cleanup errors remain visible and block restart.
+There is no automatic reconnect or retry.
+
+`bash tools/build.sh rtsp` compiles unmodified SDK live555 sources natively inside
+network-disabled Docker. A small fake codec adapter supplies synthetic access
+units/audio; real RTSP DESCRIBE/SETUP/PLAY and interleaved RTP validate SDP, bytes,
+multislice markers, shared PTS, bounds, bind conflict and stop/port release. It
+does not decode H.264 or establish camera/audio/KPU/VLC hardware success.

@@ -80,4 +80,7 @@ int MediaSource::audio(k_audio_stream *data) {
 SourceStats MediaSource::stats() const {
     std::lock_guard<std::mutex> guard(frames_); return stats_;
 }
+bool MediaSource::h264_config(std::vector<uint8_t> &sps, std::vector<uint8_t> &pps) const {
+    std::lock_guard<std::mutex> guard(frames_); return headers_.config(sps, pps);
+}
 }
