@@ -5,6 +5,7 @@
 #include "source.h"
 #include "rtsp.h"
 #include "recorder.h"
+#include "metrics.h"
 #endif
 #include <cerrno>
 #include <csignal>
@@ -64,12 +65,14 @@ int main(int argc, char **argv) {
     demo::MediaSource source;
     demo::RtspWorker rtsp(source);
     demo::Recorder record(source);
+    demo::MediaMetrics metrics;
     if (!mock) backend_error = vision.start();
 #endif
     std::fprintf(stderr, "[media] mode=%s socket=%s backend_init=%d\n", mock ? "MOCK, no hardware" : "vision IPC + shared RTSP/MP4", path, backend_error);
     while (running) {
 #ifndef DEMO_SOCKET_FIXTURE
         source.tick();
+        if (!mock) metrics.update(source.stats());
 #endif
         pollfd listener{server, POLLIN, 0};
         if (poll(&listener, 1, 100) <= 0) continue;
@@ -124,6 +127,7 @@ int main(int argc, char **argv) {
                     if (stream.error) status.last_error = stream.error;
                     if (recording.error) status.last_error = recording.error;
                     if (!status.last_error) status.last_error = retained_error;
+                    metrics.apply(status);
                 }
 #endif
                 // Preserve asynchronous vision errors across successful polling.

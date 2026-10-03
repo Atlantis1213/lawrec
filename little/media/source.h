@@ -8,6 +8,7 @@
 namespace demo {
 enum class Consumer : unsigned { Rtsp = 0, Record = 1 };
 struct SourceStats {
+    uint64_t generation = 0;
     uint64_t video_frames = 0, video_bytes = 0, audio_packets = 0, audio_bytes = 0;
     uint64_t video_pts = 0, audio_pts = 0;
     int error = 0, cleanup_error = 0;

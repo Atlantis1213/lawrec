@@ -19,5 +19,11 @@ int main() {
     assert(!demo::valid_status(status, 8));
     status.flags = 16;
     assert(!demo::valid_status(status, 9));
+    status.flags = 0; status.busy = 16;
+    assert(!demo::valid_status(status, 9));
+    status.busy = 0; status.bytes--;
+    assert(!demo::valid_status(status, 9));
+    status.bytes++; status.protocol_version--;
+    assert(!demo::valid_status(status, 9));
     std::puts("protocol: length/version/command/value/id/flags passed");
 }

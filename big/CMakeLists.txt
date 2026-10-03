@@ -21,7 +21,8 @@ target_link_directories(vision.elf PRIVATE "${MPP}/userapps/lib"
     "${CDK}/mapi/mediaserver/lib"
     "${SDK}/src/big/rt-smart/userapps/sdk/rt-thread/lib/risc-v/rv64"
     "${NN}/riscv64/nncase/lib" "${NN}/riscv64/rvvlib")
-target_link_options(vision.elf PRIVATE -static "-T${NN}/examples/cmake/link.lds"
+target_link_options(vision.elf PRIVATE -static "-T${CMAKE_CURRENT_SOURCE_DIR}/link.lds"
+    "-Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/vision.map"
     -march=rv64imafdcv -mabi=lp64d -mcmodel=medany -fopenmp)
 target_link_libraries(vision.elf PRIVATE -Wl,--start-group sys vicap vb vo sensor connector
     cam_device cam_engine hal oslayer ebase fpga isp_drv binder auto_ctrol common
@@ -30,3 +31,4 @@ target_link_libraries(vision.elf PRIVATE -Wl,--start-group sys vicap vb vo senso
     mapi ipcmsg datafifo venc aenc ai ao adec vdec vdss dma dpu vvi rtthread atomic
     rvv Nncase.Runtime.Native nncase.rt_modules.k230 functional_k230
     -Wl,--end-group)
+set_property(TARGET vision.elf APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/link.lds")

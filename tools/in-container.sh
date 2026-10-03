@@ -4,17 +4,23 @@ test -f /.dockerenv || { echo 'Docker required' >&2; exit 1; }
 SDK=$K230_SDK_ROOT
 BR="$SDK/output/$LAWREC_BOARD/little/buildroot-ext"
 export PATH="$SDK/toolchain/riscv64-linux-musleabi_for_x86_64-pc-linux-gnu/bin:$PATH"
+if [ "$1" = elf ]; then
+    readelf -W -h -S -l -r out/big/vision.elf > out/elf-inspect.txt
+fi
 if [ "$1" = verify ]; then
+    mkdir -p out/tests
     sha256sum -c patches/frozen.sha256
     cmp patches/st7701.baseline.c "$SDK/src/big/mpp/kernel/connector/src/st7701.c"
+    c++ -std=c++17 -Wall -Wextra -Werror tests/elf_check.cpp -o out/tests/elf_check
+    out/tests/elf_check out/big/vision.elf vision
     for binary in out/big/vision.elf out/little/media_service out/little/demo_ui \
                   out/little/liblvgl.so out/little/liblv_drivers.so; do
-        readelf -h "$binary" | grep -q 'Machine:.*RISC-V'
-        readelf -h "$binary" | grep -q 'Class:.*ELF64'
-        readelf -h "$binary" | grep -q 'Data:.*little endian'
+        readelf -W -h -S -l "$binary" > out/elf-readelf.txt 2> out/elf-readelf-errors.txt
+        test ! -s out/elf-readelf-errors.txt
+        out/tests/elf_check "$binary" linux
         sha256sum "$binary"
     done
-    echo 'ELF header predicates/frozen bytes passed; any SDK section warnings above remain unresolved, no loader/hardware acceptance'
+    echo 'ELF structural/static SDK loader-range/frozen-byte checks passed; hardware execution remains pending'
 fi
 case "$1" in
 big|all)
@@ -57,11 +63,22 @@ if [ "$1" = test ]; then
     out/tests/frames_test
     CDK="$SDK/src/common/cdk/user"
     c++ -std=c++17 -Wall -Wextra -Werror -pthread -Icommon -Ilittle/media -I"$MPP/include" \
+        -I"$MPP/include/comm" -I"$MPP/userapps/api" -I"$CDK/mapi/include" -I"$CDK/mapi/include/api" -I"$CDK/mapi/include/comm" \
+        tests/metrics_test.cpp little/media/metrics.cpp -o out/tests/metrics_test
+    out/tests/metrics_test
+    c++ -std=c++17 -Wall -Wextra -Werror -pthread -Icommon -Ilittle/media -I"$MPP/include" \
         -I"$MPP/include/comm" -I"$MPP/userapps/api" -I"$CDK/mapi/include" \
         -I"$CDK/mapi/include/api" -I"$CDK/mapi/include/comm" \
         tests/source_test.cpp little/media/source.cpp little/media/source_frames.cpp \
         common/frame.cpp common/frame_queue.cpp -o out/tests/source_test
     timeout 10 out/tests/source_test
+fi
+if [ "$1" = ui ]; then
+    export LVGL_ROOT="${LVGL_ROOT:-$BR/build/lawrec/thirdlib/lvgl}"
+    cmake -S tests/ui -B out/tests/ui -DCMAKE_BUILD_TYPE=Debug
+    cmake --build out/tests/ui -j "$LAWREC_JOBS"
+    mkdir -p out/ui-preview
+    out/tests/ui/ui_test out/ui-preview
 fi
 if [ "$1" = rtsp ]; then
     cmake -S tests/rtsp -B out/tests/rtsp -DCMAKE_BUILD_TYPE=Debug

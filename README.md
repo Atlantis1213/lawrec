@@ -11,8 +11,8 @@ cross-compile. **All hardware operation remains unverified.**
 `media_service` forwards preview/AI/status to vision and runs a real asynchronous
 live555 H.264/G.711A RTSP consumer and an independent MP4 recorder from the
 same encoder/audio source. Both are wired to the one-page UI. Offline mux/decode
-and loopback RTP tests are not hardware/VLC acceptance. Metrics, final rendering
-and a complete deployment bundle are still being developed.
+and loopback RTP tests are not hardware/VLC acceptance. Actual LVGL rendering
+and measured metrics are integrated; a deployment bundle is still being prepared.
 `--mock SOCKET` is exclusively an offline control fixture; never deploy it as media.
 
 ## Ownership
@@ -34,6 +34,7 @@ bash tools/build.sh all
 bash tools/build.sh test
 bash tools/build.sh rtsp
 bash tools/build.sh media
+bash tools/build.sh ui
 bash tools/build.sh verify
 ```
 
@@ -189,3 +190,38 @@ and an automatically finalized 15s file. A narrow codec adapter accelerates PTS
 delivery and checks one codec owner shared by RTSP/record, both stop orders,
 write/close errors and an absent-frame deadline. This is not a 15s wall-clock
 soak or evidence of actual K230 codec/audio/synchronization performance.
+
+## Metrics And Actual Page Render
+
+Protocol v2 is 24-byte requests / 84-byte status; rebuild both cores and UI
+together. Camera/AI stats come from vision. Callback frame/byte deltas provide
+measured H264 FPS and kbps over one-second monotonic windows, not configured
+30 FPS/4000 kbps or client throughput. Source restarts reset the rate baseline.
+Queues are the sum of both independent consumers' current depths.
+
+CPU is `/proc/self/stat` utime+stime for **media_service only**, 100% is one CPU;
+RSS is that same process's resident pages. UI/RT-Smart CPU/RSS are not included.
+Missing measurements display `--`, not zero. VB is the configured common+OSD
+pool budget, excluding KPU tensors and metadata, not a measured allocator total.
+
+`bash tools/build.sh ui` builds SDK LVGL with the exact frozen config/fonts and
+the actual board page module, rendering `out/ui-preview/{idle,running,error}.png`.
+It checks bounds, transparent preview center, button commands, busy gating and
+media STOP after backend failure. The background grid and populated metrics
+are synthetic; this is not an LCD/camera/DRM/touch hardware test or an HTML mockup.
+
+## Static Big ELF Layout
+
+The SDK example's `*(*.got)` accidentally includes `.rela.got`, making `.got`
+an invalid RELA section (8-byte entries versus required 24). The application
+now owns a derived linker script with exact GOT patterns, collected `.rodata.*`,
+explicit RX/RW page-start PT_LOADs and TLS. A remaining all-zero R_RISCV_NONE
+record stays in its own correctly typed RELA section on the writable mapping.
+The SDK loader categorizes allocated non-PROGBITS as data, so this section must
+not share the text mapping's last page. No section is stripped to hide errors.
+
+Docker `verify` requires clean readelf output and checks ELF table/entry sizes,
+PT_LOAD bounds/alignment, RT-Smart entry/address/mapping rules, no dynamic loader
+or unresolved strong symbols, and only harmless zero relocations. It rejects a
+copy mutated back to the old bad RELA size. This is structural compatibility,
+not execution of the hardware loader or proof the old board black screen is fixed.

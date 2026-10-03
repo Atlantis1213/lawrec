@@ -60,6 +60,17 @@ files, compiler versions or ELF attributes were changed/stripped. Big integratio
 also uses the existing host archive; successful linkage does not prove either
 core's IPC transport or runtime ABI on hardware.
 
+## Application Linker Script
+
+`big/link.lds` derives from SDK nncase/examples/cmake/link.lds (RT-Thread,
+Apache-2.0), preserving startup symbols and 0x200000000 entry. It replaces
+wildcards matching relocation metadata as GOT, collects small/read-only data,
+retains TLS, and defines separate page-start RX/RW load segments. The actual
+SDK load_elf implementation maps non-PROGBITS allocations as writable, so the
+correctly typed, all-zero RELA metadata lives after the text page boundary.
+SDK/toolchain sources and binaries are unchanged. Structural loader assumptions
+are checked by Docker verify; on-board program loading remains pending.
+
 ## Private MP4 Build
 
 Linux media compiles the existing CDK `middleware/mp4_format/src/libmov` and

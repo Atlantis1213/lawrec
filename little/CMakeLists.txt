@@ -9,7 +9,7 @@ set(LVGL_ROOT "$ENV{LVGL_ROOT}")
 include("${CMAKE_CURRENT_SOURCE_DIR}/../tools/mp4.cmake")
 add_executable(media_service media/main.cpp media/vision_client.cpp
     media/source.cpp media/source_frames.cpp media/live_source.cpp media/rtsp_stream.cpp
-    media/rtsp.cpp media/recorder.cpp media/mp4_sink.cpp ../common/frame.cpp ../common/frame_queue.cpp)
+    media/rtsp.cpp media/recorder.cpp media/mp4_sink.cpp media/metrics.cpp ../common/frame.cpp ../common/frame_queue.cpp)
 target_compile_definitions(media_service PRIVATE NO_OPENSSL=1)
 target_compile_options(media_service PRIVATE -Wall -Wextra)
 target_include_directories(media_service PRIVATE ../common
@@ -38,7 +38,7 @@ add_library(lv_drivers SHARED "${PORT}/k230/lv_port_disp.cpp"
 target_compile_definitions(lv_drivers PRIVATE CONFIG_BOARD_K230_CANMV_LCKFB=1)
 target_include_directories(lv_drivers PRIVATE "${CMAKE_SYSROOT}/usr/include/libdrm")
 target_link_libraries(lv_drivers PRIVATE lvgl disp pthread drm)
-add_executable(demo_ui ui/main.cpp ../common/socket.cpp)
+add_executable(demo_ui ui/main.cpp ui/page.cpp ../common/socket.cpp)
 target_compile_options(demo_ui PRIVATE -Wall -Wextra)
 target_include_directories(demo_ui PRIVATE ../common)
 target_link_libraries(demo_ui PRIVATE lv_drivers lvgl pthread)

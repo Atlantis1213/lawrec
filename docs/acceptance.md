@@ -15,7 +15,10 @@
 - [x] Independent queues, first/last source ownership, PTS and actual MP4 close checks.
 - [x] Real x264 sample + SDK muxer/readback + independent FFmpeg decode,
   0.5s sample-clipped and 15s automatically finalized H264/G711A files; shared-source stop orders.
-- [ ] Single-page actual LVGL rendering and final measured-metric integration.
+- [x] Single-page actual LVGL rendering, transparency/layout/commands/busy/error checks.
+- [x] AI times/FPS, callback video FPS/bitrate, queue depth, media CPU/RSS and configured VB budget integration.
+- [x] Clean readelf output, full ELF table sizes and static RT-Smart mapping/entry/relocation checks;
+  this is not execution of the board loader.
 - [ ] Commit-based application package, ELF/library/model hashes and startup scripts.
 
 ## Board Gates (All Pending)

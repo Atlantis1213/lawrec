@@ -212,3 +212,33 @@ Offline development only. No hardware acceptance has been performed for this rep
   not loader acceptance. No claim the old board preview has been repaired.
 - Next: metrics and actual LVGL render, resolve big ELF loader/structure concern,
   then commit-based package/startup/model/library metadata and final scope audit.
+
+### 2026-10-03: Actual LVGL Page, Measured Metrics And Big ELF Layout
+
+- Changes: spacious portrait page module used by both demo_ui and native LVGL
+  render. Header/metrics/four buttons are separated from a transparent preview
+  center. Socket calls remain off the LVGL thread; busy/error/media STOP handling
+  is retained. Real callback FPS/kbps, source generation resets and media process
+  CPU/RSS are wired after vision status merge. Wire version becomes 2/84 bytes;
+  rebuild all programs together. Missing CPU/RSS shows --; VB is a budget only.
+- Findings/fix: real render caught an overflowing preview label; shortened it.
+  SDK example linker wildcard *(*.got) included .rela.got, giving .got the wrong
+  type/entry size. An application-side derived script uses exact patterns, explicit
+  RX/RW page-start segments and proper TLS. The SDK loader maps non-PROGBITS
+  allocated sections as data; place the remaining all-zero R_RISCV_NONE section
+  beyond the text page to avoid mapping overlap. No SDK mutation or stripped
+  warning metadata. A verifier checks these static loader constraints.
+- Validation: Docker tools/build.sh all, test, ui and verify passed. Parser/rate
+  checks cover process names with spaces/parentheses, malformed data, restart,
+  idle and saturation; RSS is actually sampled from the test process's /proc.
+  Three PNGs are real SDK LVGL + actual page renders, with bounds/transparency
+  and button command tests. running.png was visually inspected. readelf now has
+  no invalid sh_entsize warning; the structural checker rejects the old malformed
+  RELA layout. Logs: out/build-metrics-ui.log, out/test-metrics.log,
+  out/test-ui.log, out/verify-ui-elf.log, out/build-elf.log.
+- Unverified/risks: screenshots use synthetic grid/stats, not the camera or LCD.
+  Hardware frames, blending, KPU, codec clocks, Linux DRM vblank and runtime ELF
+  loading remain board gates. The old lawrec bind/dump logs do not prove a new
+  Demo pass or its black-screen root cause. Frozen touch/panel checks pass.
+- Next: clean commit-based application package, dependency/model/provenance
+  metadata and startup/stop instructions, then concise whole-Demo acceptance.

@@ -90,7 +90,12 @@ int MediaSource::attach(Consumer consumer, Feed &feed) {
         std::lock_guard<std::mutex> guard(frames_);
         if (feeds_[1 - index] == &feed) return -EINVAL;
         if (owners_ && stats_.error) return stats_.error;
-        if (!owners_) { headers_.reset(); stats_ = {}; video_pts_valid_ = audio_pts_valid_ = false; }
+        if (!owners_) {
+            headers_.reset();
+            auto generation = stats_.generation + 1;
+            stats_ = {}; stats_.generation = generation;
+            video_pts_valid_ = audio_pts_valid_ = false;
+        }
         feed.video.reset(); feed.audio.reset(); feeds_[index] = &feed;
     }
     int ret = owners_ ? check("joining consumer IDR", kd_mapi_venc_request_idr(0)) : start();
