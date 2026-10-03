@@ -42,3 +42,10 @@ add_executable(demo_ui ui/main.cpp ui/page.cpp ../common/socket.cpp)
 target_compile_options(demo_ui PRIVATE -Wall -Wextra)
 target_include_directories(demo_ui PRIVATE ../common)
 target_link_libraries(demo_ui PRIVATE lv_drivers lvgl pthread)
+add_executable(democtl ui/ctl.cpp ../common/socket.cpp)
+target_compile_options(democtl PRIVATE -Wall -Wextra)
+target_include_directories(democtl PRIVATE ../common)
+set_target_properties(media_service demo_ui democtl PROPERTIES
+    BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "$ORIGIN/../lib")
+set_target_properties(lvgl lv_drivers PROPERTIES
+    BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "$ORIGIN")

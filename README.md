@@ -12,7 +12,8 @@ cross-compile. **All hardware operation remains unverified.**
 live555 H.264/G.711A RTSP consumer and an independent MP4 recorder from the
 same encoder/audio source. Both are wired to the one-page UI. Offline mux/decode
 and loopback RTP tests are not hardware/VLC acceptance. Actual LVGL rendering
-and measured metrics are integrated; a deployment bundle is still being prepared.
+and measured metrics are integrated. Packaging/startup tools are present;
+hardware acceptance remains pending.
 `--mock SOCKET` is exclusively an offline control fixture; never deploy it as media.
 
 ## Ownership
@@ -36,6 +37,9 @@ bash tools/build.sh rtsp
 bash tools/build.sh media
 bash tools/build.sh ui
 bash tools/build.sh verify
+bash tools/build.sh bundle-check
+# Requires a clean committed worktree; fresh output directory:
+bash tools/build.sh package
 ```
 
 Uses K230 SDK Docker with networking disabled and SDK mounted read-only.
@@ -53,8 +57,9 @@ DRM overlay; it never calls connector power/reset/init.
 
 Final RTSP URL: `rtsp://<board-ip>:8554/lawrec`. VLC example after acceptance:
 `vlc --rtsp-tcp rtsp://<board-ip>:8554/lawrec`.
-Final record directory: `/sharefs/lawrec_records`. Applications are not yet a
-deployable full pipeline; startup scripts/package/model instructions follow integration.
+Final record directory: `/sharefs/lawrec_records`. See [deployment](docs/deployment.md)
+for the offline application bundle, big-core command, Linux start/stop, democtl
+and one short functional pass. This is not a new firmware or a hardware pass.
 
 Camera follows the SDK sample's pre-start VI-to-VO binding order. Preview ON/OFF
 only enables/disables video layer1; the camera binding and RGB/YUV feeds remain

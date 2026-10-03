@@ -242,3 +242,30 @@ Offline development only. No hardware acceptance has been performed for this rep
   Demo pass or its black-screen root cause. Frozen touch/panel checks pass.
 - Next: clean commit-based application package, dependency/model/provenance
   metadata and startup/stop instructions, then concise whole-Demo acceptance.
+
+### 2026-10-03: Application Bundle And Scoped Startup Tools
+
+- Changes: democtl for fixed socket commands/status; clean-worktree package
+  entrypoint with fresh cross-build output per commit/UTC. Bundle scripts collect
+  exact model bytes and recursive Linux DT_NEEDED libraries from the same SDK,
+  including its matching private loader. Per-program strong dynamic symbols and
+  version names must resolve; host SDK RPATHs are replaced by $ORIGIN paths.
+  Hashes/source paths/compiler/image/commit/verification logs accompany the archive.
+- Decisions: application-only archive, no firmware/SD image, installation, SSH or
+  network edits. User starts vision manually first. Linux scripts register only
+  their own PID/start-time/command identities, stop UI before media and never
+  SIGKILL an MP4 writer. Model/third-party provenance and redistribution limits
+  are explicit; native x264/FFmpeg are not shipped.
+- Validation: Docker little and verify passed including democtl. bundle-check
+  validates POSIX/shell syntax, rejects unrelated/reused live PIDs without signals,
+  resolves actual Linux binary/library symbol-version closures and deliberately
+  rejects a missing liblvgl. Native real MP4/decode regression passed again after
+  source metrics changes (0.5s and 15s H264/PCMA; fake codecs only). Logs:
+  out/build-ctl.log, out/verify-package-tools.log, out/test-bundle.log,
+  out/test-final-media.log. After $ORIGIN relink, out/build-final-linux.log,
+  out/verify-final-linux.log and out/test-final-bundle.log passed again. A dirty
+  worktree package request was rejected before Docker/build (out/test-package-dirty.log).
+  No board accessed.
+- Pending: run the fresh package command after committing these tools; record
+  the actual archive/hash and clean-build result in the next log entry. All
+  hardware gates remain pending; packaging is not an installation or camera fix.

@@ -3,7 +3,18 @@ set -euo pipefail
 test -f /.dockerenv || { echo 'Docker required' >&2; exit 1; }
 SDK=$K230_SDK_ROOT
 BR="$SDK/output/$LAWREC_BOARD/little/buildroot-ext"
+BUILD_ROOT=${LAWREC_BUILD_ROOT:-out}
 export PATH="$SDK/toolchain/riscv64-linux-musleabi_for_x86_64-pc-linux-gnu/bin:$PATH"
+if [ "$1" = package ]; then
+    exec bash tools/package.sh
+fi
+if [ "$1" = bundle-check ]; then
+    bash -n tools/package.sh tools/runtime-libs.sh tools/runtime-check.sh
+    for script in tools/board/*.sh; do sh -n "$script"; done
+    bash tests/scripts_test.sh
+    c++ -std=c++17 -Wall -Wextra -Werror tests/elf_check.cpp -o out/tests/elf_check
+    bash tests/runtime_test.sh "$BR/host/riscv64-buildroot-linux-gnu/sysroot"
+fi
 if [ "$1" = elf ]; then
     readelf -W -h -S -l -r out/big/vision.elf > out/elf-inspect.txt
 fi
@@ -12,9 +23,9 @@ if [ "$1" = verify ]; then
     sha256sum -c patches/frozen.sha256
     cmp patches/st7701.baseline.c "$SDK/src/big/mpp/kernel/connector/src/st7701.c"
     c++ -std=c++17 -Wall -Wextra -Werror tests/elf_check.cpp -o out/tests/elf_check
-    out/tests/elf_check out/big/vision.elf vision
-    for binary in out/big/vision.elf out/little/media_service out/little/demo_ui \
-                  out/little/liblvgl.so out/little/liblv_drivers.so; do
+    out/tests/elf_check "$BUILD_ROOT/big/vision.elf" vision
+    for binary in "$BUILD_ROOT/big/vision.elf" "$BUILD_ROOT/little/media_service" "$BUILD_ROOT/little/demo_ui" \
+                  "$BUILD_ROOT/little/democtl" "$BUILD_ROOT/little/liblvgl.so" "$BUILD_ROOT/little/liblv_drivers.so"; do
         readelf -W -h -S -l "$binary" > out/elf-readelf.txt 2> out/elf-readelf-errors.txt
         test ! -s out/elf-readelf-errors.txt
         out/tests/elf_check "$binary" linux
@@ -24,15 +35,15 @@ if [ "$1" = verify ]; then
 fi
 case "$1" in
 big|all)
-    cmake -S big -B out/big
-    cmake --build out/big -j "$LAWREC_JOBS"
+    cmake -S big -B "$BUILD_ROOT/big"
+    cmake --build "$BUILD_ROOT/big" -j "$LAWREC_JOBS"
     ;;
 esac
 case "$1" in
 little|all)
     export LVGL_ROOT="${LVGL_ROOT:-$BR/build/lawrec/thirdlib/lvgl}"
-    cmake -S little -B out/little -DCMAKE_TOOLCHAIN_FILE="$BR/host/share/buildroot/toolchainfile.cmake"
-    cmake --build out/little -j "$LAWREC_JOBS"
+    cmake -S little -B "$BUILD_ROOT/little" -DCMAKE_TOOLCHAIN_FILE="$BR/host/share/buildroot/toolchainfile.cmake"
+    cmake --build "$BUILD_ROOT/little" -j "$LAWREC_JOBS"
     ;;
 esac
 if [ "$1" = test ]; then

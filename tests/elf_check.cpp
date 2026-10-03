@@ -47,7 +47,7 @@ void check(const Image &image, bool vision) {
         require(header.e_type == ET_EXEC && header.e_entry == 0x200000000ULL, "RT-Smart static entry/type");
         require(header.e_phnum * sizeof(Elf64_Phdr) <= 4096 - 16, "RT-Smart aux program table too large");
         require((header.e_flags & EF_RISCV_FLOAT_ABI) == EF_RISCV_FLOAT_ABI_DOUBLE, "vision float ABI");
-    }
+    } else require(header.e_type == ET_EXEC || header.e_type == ET_DYN, "Linux runtime must be EXEC or DYN");
     std::vector<Elf64_Shdr> sections;
     Mapping text, data;
     for (unsigned i = 0; i < header.e_shnum; ++i) {
