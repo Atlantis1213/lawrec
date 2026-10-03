@@ -38,7 +38,8 @@ add_library(lv_drivers SHARED "${PORT}/k230/lv_port_disp.cpp"
 target_compile_definitions(lv_drivers PRIVATE CONFIG_BOARD_K230_CANMV_LCKFB=1)
 target_include_directories(lv_drivers PRIVATE "${CMAKE_SYSROOT}/usr/include/libdrm")
 target_link_libraries(lv_drivers PRIVATE lvgl disp pthread drm)
-add_executable(demo_ui ui/main.cpp ui/page.cpp ../common/socket.cpp)
+add_executable(demo_ui ui/main.cpp ui/page.cpp ui/fonts/demo_font_cn_20.c
+    ui/fonts/demo_font_cn_24.c ui/fonts/demo_font_cn_32.c ../common/socket.cpp)
 target_compile_options(demo_ui PRIVATE -Wall -Wextra)
 target_include_directories(demo_ui PRIVATE ../common)
 target_link_libraries(demo_ui PRIVATE lv_drivers lvgl pthread)

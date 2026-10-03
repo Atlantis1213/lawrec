@@ -84,3 +84,22 @@ Native x264 and FFmpeg are offline test tools only, copied from SDK big MPP
 middleware sources to `out/tests/native`, configured and built in Docker. No
 network download, host compilation or board update is used. Their binaries and
 generated black-video/G711A sample files are not part of the deployment package.
+
+## Chinese UI Font Subsets
+
+New application-only `little/ui/fonts/demo_font_cn_{20,24,32}.c` are generated
+with cached lv_font_conv 1.5.3 in network-disabled K230 Docker. The converter's
+Node runtime/cache are optional generation tools, not ordinary build or runtime
+dependencies. This run used Node v24.21.0; no tool download or SDK write.
+
+Source fonts under SDK LVGL scripts/built_in_font:
+
+- SimSun.woff SHA256 `0a66507086f0229f4640eb4ca40e4f3d500b3791c1696aa815fb637066f1ec05`.
+- Montserrat-Medium.ttf SHA256 `421f26b23e2be6b98373d32acd3cb2897b154d4bf0a77d26534ce476e4cbed53`.
+
+Use Montserrat ASCII plus the actual page's non-ASCII subset, 4bpp/uncompressed/
+no kerning. Generated source headers record options; out/ui-font-provenance.txt
+records the original inputs and characters. These subsets do not modify
+compat/lvgl_port, its original font, touch mapping or the panel baseline. Font
+source licensing remains covered by the same local SDK/third-party distribution
+caution in model.md; generation does not grant a new license.

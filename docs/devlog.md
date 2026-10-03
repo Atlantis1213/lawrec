@@ -321,3 +321,29 @@ Offline development only. No hardware acceptance has been performed for this rep
 - This final documentation commit changes no application bytes. The bundle's
   checklist was captured just before packaging; meta/ contains actual completed
   clean-build/verification evidence. Old repository user changes remain intact.
+
+### 2026-10-03: Chinese UI For The 3.1-Inch Panel
+
+- Changes: Chinese home page and operation/error messages. Compact 96px header,
+  372px transparent preview band, two short metric columns and four 216x104px
+  controls. Control/title fonts are 32px; primary values/state 24px; secondary
+  feedback 20px. Detailed AI stages, rates, queues, media CPU/RSS/VB and full
+  error codes move into a Chinese details modal, not a crowded permanent header.
+  Details/return are local UI operations; the modal blocks underlying commands.
+- Fonts: application-only generated subsets from SDK SimSun + Montserrat using
+  cached lv_font_conv 1.5.3/Node in network-none Docker, both mounted read-only.
+  Fonts are committed C assets; ordinary builds have no Node/old-project
+  dependency. Collect Chinese characters from page.cpp automatically. Frozen
+  adapter, original 16px font, portrait touch mapping and panel/PHY are unchanged.
+- Validation: tools/build.sh fonts, ui, little and verify passed in Docker.
+  Actual LVGL PNGs cover idle/running/busy/error plus details/error-details.
+  Check every visible character for a real glyph, large touch target dimensions,
+  transparent preview, bounds and existing busy/error STOP behavior. Opening,
+  closing and clicking behind the modal emit no media command. Running/details
+  screenshots were visually inspected. Logs: out/build-cn-fonts.log,
+  out/test-ui-cn.log, out/build-ui-cn.log, out/verify-ui-cn.log.
+- Remaining: physical readability/finger touch on the 3.1-inch LCD still needs
+  the short board acceptance. Render background/stats are synthetic. No SSH,
+  board update, media change, timing change or long regression was performed.
+  The previous d598a92 archive has the English page; create a new clean package
+  from this UI commit before deploying the Chinese version.

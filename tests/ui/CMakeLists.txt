@@ -9,7 +9,9 @@ add_library(lvgl_native STATIC ${lvgl_sources} "${PORT}/lawrec_font_cn_16.c")
 target_include_directories(lvgl_native PUBLIC "${LVGL_ROOT}" "${PORT}")
 target_compile_definitions(lvgl_native PUBLIC LV_CONF_INCLUDE_SIMPLE=1 LV_LVGL_H_INCLUDE_SIMPLE=1)
 target_link_libraries(lvgl_native PUBLIC m)
-add_executable(ui_test ui_test.cpp "${ROOT}/little/ui/page.cpp")
+add_executable(ui_test ui_test.cpp "${ROOT}/little/ui/page.cpp"
+    "${ROOT}/little/ui/fonts/demo_font_cn_20.c" "${ROOT}/little/ui/fonts/demo_font_cn_24.c"
+    "${ROOT}/little/ui/fonts/demo_font_cn_32.c")
 target_include_directories(ui_test PRIVATE "${ROOT}/common" "${ROOT}/little/ui")
 target_compile_options(ui_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(ui_test PRIVATE lvgl_native)

@@ -8,6 +8,10 @@ export PATH="$SDK/toolchain/riscv64-linux-musleabi_for_x86_64-pc-linux-gnu/bin:$
 if [ "$1" = package ]; then
     exec bash tools/package.sh
 fi
+if [ "$1" = fonts ]; then
+    export LVGL_ROOT="${LVGL_ROOT:-$BR/build/lawrec/thirdlib/lvgl}"
+    exec bash tools/fonts.sh
+fi
 if [ "$1" = bundle-check ]; then
     bash -n tools/package.sh tools/runtime-libs.sh tools/runtime-check.sh tools/compiler-info.sh
     for script in tools/board/*.sh; do sh -n "$script"; done

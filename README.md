@@ -216,6 +216,31 @@ It checks bounds, transparent preview center, button commands, busy gating and
 media STOP after backend failure. The background grid and populated metrics
 are synthetic; this is not an LCD/camera/DRM/touch hardware test or an HTML mockup.
 
+The UI is Chinese and sized for the 3.1-inch 480x800 portrait panel: 32px
+titles/control names, 24px primary values/button states, 20px secondary feedback,
+and four 216x104px touch targets (about 18x9 mm at the nominal screen diagonal).
+The 372px-high preview band remains transparent. The home page shows just face
+count/AI latency/video FPS/bitrate; stage times, queues, media CPU/RSS/VB and full
+error codes are available under `详情`, without a backend command or a new settings
+page. `返回画面` closes the modal; underlying controls cannot be activated through it.
+
+Committed subset fonts are normal C sources; ordinary builds do not require
+Node or the old project. Optional offline regeneration uses an existing Node
+binary and cached **lv_font_conv 1.5.3 node_modules** directory, both read-only:
+
+```sh
+export LV_FONT_NODE_BIN=/path/to/existing/node
+export LV_FONT_CONVERTER_ROOT=/path/to/existing/node_modules
+bash tools/build.sh fonts
+bash tools/build.sh ui
+```
+
+The generator takes all non-ASCII characters directly from page.cpp and mixes
+SDK SimSun glyphs with Montserrat ASCII at 20/24/32px, without changing the frozen
+16px adapter font or config. The render fixture checks actual glyph availability,
+layout, large buttons, modal behavior and busy/error states. Screenshot files
+include `running.png`, `details.png`, `busy.png`, `error.png` and `error-details.png`.
+
 ## Static Big ELF Layout
 
 The SDK example's `*(*.got)` accidentally includes `.rela.got`, making `.got`

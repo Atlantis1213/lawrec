@@ -26,12 +26,23 @@ void command(void *context, uint32_t operation, uint32_t value) {
     ++click->count; click->command = operation; click->value = value;
 }
 void in_bounds(lv_obj_t *object) {
+    if (lv_obj_has_flag(object, LV_OBJ_FLAG_HIDDEN)) return;
     lv_area_t area;
     lv_obj_get_coords(object, &area);
     assert(area.x1 >= 0 && area.y1 >= 0 && area.x2 < width && area.y2 < height);
     if (lv_obj_check_type(object, &lv_label_class)) {
         auto *text = lv_label_get_text(object);
         assert(text && *text);
+        uint32_t offset = 0;
+        auto *font = lv_obj_get_style_text_font(object, 0);
+        while (text[offset]) {
+            uint32_t character = _lv_txt_encoded_next(text, &offset);
+            if (character == '\n') continue;
+            lv_font_glyph_dsc_t glyph{};
+            bool found = lv_font_get_glyph_dsc(font, &glyph, character, 0);
+            if (!found || glyph.is_placeholder) std::fprintf(stderr, "missing glyph U+%04X in '%s'\n", character, text);
+            assert(found && !glyph.is_placeholder);
+        }
         // Text must not wrap outside its parent (especially two-line metrics).
         lv_area_t parent;
         lv_obj_get_coords(lv_obj_get_parent(object), &parent);
@@ -42,12 +53,13 @@ void in_bounds(lv_obj_t *object) {
     }
     for (unsigned i = 0; i < lv_obj_get_child_cnt(object); ++i) in_bounds(lv_obj_get_child(object, i));
 }
-void render(const std::string &path) {
+void render(const std::string &path, bool details = false) {
     tick += 250;
     lv_obj_update_layout(lv_scr_act());
     in_bounds(lv_scr_act());
     lv_refr_now(nullptr);
-    assert(screen[300 * width + 240].ch.alpha == 0); // Camera/OSD remain visible.
+    assert(details ? screen[300 * width + 240].ch.alpha == 255 :
+        screen[300 * width + 240].ch.alpha == 0); // Preview remains transparent outside details.
     assert(screen[40 * width + 20].ch.alpha == 255);
     // Actual LVGL pixels over a synthetic grid, not camera evidence.
     std::vector<uint8_t> rgb;
@@ -97,16 +109,29 @@ int main(int argc, char **argv) {
     view.status.video_queue = 2; view.status.audio_queue = 1;
     page.update(view);
     render(std::string(argv[1]) + "/running.png");
+    for (unsigned i = 0; i < 4; ++i) {
+        assert(lv_obj_get_width(page.button(i)) == 216 && lv_obj_get_height(page.button(i)) >= 104);
+    }
+    lv_event_send(page.details_button(), LV_EVENT_CLICKED, nullptr);
+    assert(page.details_visible() && click.count == 1);
+    lv_event_send(page.button(0), LV_EVENT_CLICKED, nullptr); assert(click.count == 1);
+    render(std::string(argv[1]) + "/details.png", true);
+    lv_event_send(page.close_button(), LV_EVENT_CLICKED, nullptr);
+    assert(!page.details_visible() && click.count == 1);
+    render(std::string(argv[1]) + "/running.png");
     lv_event_send(page.button(2), LV_EVENT_CLICKED, nullptr);
     assert(click.count == 2 && click.command == 3 && click.value == 0);
     view.pending = true; page.update(view);
     lv_event_send(page.button(3), LV_EVENT_CLICKED, nullptr); assert(click.count == 2);
     view.pending = false; view.status.busy = demo::Record; page.update(view);
     lv_event_send(page.button(3), LV_EVENT_CLICKED, nullptr); assert(click.count == 2);
+    render(std::string(argv[1]) + "/busy.png");
     view.status.busy = 0; view.transport_error = -ETIMEDOUT; page.update(view);
     assert(lv_obj_has_state(page.button(0), LV_STATE_DISABLED));
     assert(!lv_obj_has_state(page.button(2), LV_STATE_DISABLED));
     lv_event_send(page.button(2), LV_EVENT_CLICKED, nullptr); assert(click.count == 3);
     render(std::string(argv[1]) + "/error.png");
-    std::puts("LVGL: actual page rendered; viewport alpha/layout/commands/busy/error STOP passed (no hardware)");
+    lv_event_send(page.details_button(), LV_EVENT_CLICKED, nullptr);
+    render(std::string(argv[1]) + "/error-details.png", true);
+    std::puts("LVGL: Chinese glyph coverage, 3.1-inch layout/large controls, details, viewport alpha/commands/busy/error STOP passed (no hardware)");
 }
