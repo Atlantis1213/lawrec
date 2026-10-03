@@ -9,8 +9,10 @@ Three-channel camera/preview, single MobileRetinaFace AI2D/KPU integration,
 face decoding/OSD, SDK control IPC and a single asynchronous LVGL page now
 cross-compile. **All hardware operation remains unverified.**
 `media_service` forwards preview/AI/status to vision and runs a real asynchronous
-live555 H.264/G.711A RTSP consumer. Record still returns `-ENOSYS`: the MP4
-consumer is not finished. Loopback RTP tests are not hardware/VLC acceptance.
+live555 H.264/G.711A RTSP consumer and an independent MP4 recorder from the
+same encoder/audio source. Both are wired to the one-page UI. Offline mux/decode
+and loopback RTP tests are not hardware/VLC acceptance. Metrics, final rendering
+and a complete deployment bundle are still being developed.
 `--mock SOCKET` is exclusively an offline control fixture; never deploy it as media.
 
 ## Ownership
@@ -31,6 +33,7 @@ export K230_SDK_ROOT=/home/atlantis/k230_sdk
 bash tools/build.sh all
 bash tools/build.sh test
 bash tools/build.sh rtsp
+bash tools/build.sh media
 bash tools/build.sh verify
 ```
 
@@ -148,3 +151,41 @@ network-disabled Docker. A small fake codec adapter supplies synthetic access
 units/audio; real RTSP DESCRIBE/SETUP/PLAY and interleaved RTP validate SDP, bytes,
 multislice markers, shared PTS, bounds, bind conflict and stop/port release. It
 does not decode H.264 or establish camera/audio/KPU/VLC hardware success.
+
+## MP4 Recording
+
+Record ON reserves a unique file under `/sharefs/lawrec_records`, subscribes to
+the shared source and starts on a complete IDR. The worker writes H264 and PCMA,
+not the SDK wrapper's sometimes-substituted PCMU. It reports recording only
+after both tracks have a successfully written sample. No initial frames/audio
+within three seconds fails visibly. Record STOP does not require a vision ACK.
+
+Each clip ends automatically at 15 seconds of source PTS, or earlier on STOP.
+Normal stop detaches just the record feed, drains its bounded accepted tail and
+clips G711A to the video window on 125-us sample boundaries. Audio waits for a
+confirmed video boundary; it cannot be written arbitrarily ahead of video.
+Both tracks share the first IDR epoch. The muxer accepts milliseconds, so audio
+sample data is exact but timestamp/final-duration rounding is bounded by 1 ms.
+The fixed encoder uses no reordered B frames; PTS is also DTS.
+
+All SDK temporary frames are already copied before the recorder accesses them.
+Only the worker writes/closes MP4, never codec callbacks or the UI. `.mp4.part`
+is renamed to `.mp4` only after both tracks and finalization succeed; failed
+partial recordings are logged, not presented as successful files. Write/seek/
+flush/close failures are retained. No fast-start relocation, fsync/power-loss
+recovery, playback page or automated recovery is implemented.
+
+Use SDK libmov/libflv rather than reimplementing a container. `tools/mp4.cmake`
+builds private normalized source copies in `out/`; `patches/mp4-end-time.cmake`
+adds an explicit final track boundary. Stock libmov otherwise writes a 1-ms
+last sample delta and estimates a different header duration. The small patch
+aligns stts/mdhd durations and avoids reading an uninitialized next-sample
+sentinel. No SDK source, installed archive, panel or touch adapter is changed.
+
+`bash tools/build.sh media` caches native x264/FFmpeg builds from existing SDK
+sources, wholly in Docker/out. Real x264 creates a short 720p/no-B sample; actual
+SDK muxer/readback and independent FFmpeg decode check a sample-clipped 0.5s file
+and an automatically finalized 15s file. A narrow codec adapter accelerates PTS
+delivery and checks one codec owner shared by RTSP/record, both stop orders,
+write/close errors and an absent-frame deadline. This is not a 15s wall-clock
+soak or evidence of actual K230 codec/audio/synchronization performance.

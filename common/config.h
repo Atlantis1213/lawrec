@@ -18,4 +18,5 @@ constexpr const char *ipc_service = "lawrec_demo";
 constexpr unsigned ipc_port = 102;
 constexpr const char *socket_path = "/var/run/lawrec-demo.sock";
 constexpr const char *record_directory = "/sharefs/lawrec_records";
+constexpr uint64_t record_duration_us = 15 * 1000000;
 }

@@ -68,3 +68,18 @@ if [ "$1" = rtsp ]; then
     cmake --build out/tests/rtsp -j "$LAWREC_JOBS"
     timeout 15 out/tests/rtsp/rtsp_test
 fi
+if [ "$1" = media ]; then
+    bash tools/native-codecs.sh
+    cmake -S tests/rtsp -B out/tests/rtsp -DCMAKE_BUILD_TYPE=Debug
+    cmake --build out/tests/rtsp -j "$LAWREC_JOBS"
+    cmake -S tests/media -B out/tests/media -DCMAKE_BUILD_TYPE=Debug
+    cmake --build out/tests/media -j "$LAWREC_JOBS"
+    timeout 15 out/tests/media/media_test
+    for clip in out/tests/media/clip.mp4 out/tests/media/auto-15s.mp4; do
+        out/tests/native/ffmpeg/ffprobe -v error -show_entries stream=codec_name,width,height,sample_rate,channels,duration \
+            -of compact "$clip"
+        out/tests/native/ffmpeg/ffmpeg -v error -xerror -i "$clip" \
+            -map 0:v:0 -c:v wrapped_avframe -map 0:a:0 -c:a pcm_s16le -f null -
+    done
+    echo 'independent FFmpeg H264/G711A decode passed (generated input, not board codecs)'
+fi

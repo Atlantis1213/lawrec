@@ -169,3 +169,46 @@ Offline development only. No hardware acceptance has been performed for this rep
   section-table warning persists; header/hash verification is not loader acceptance.
 - Next: real MP4 worker from the independent record feed, simultaneous control,
   metrics, actual LVGL render and a verified application bundle remain required.
+
+### 2026-10-03: Independent MP4 Recorder And Real Decode Check
+
+- Changes: actual asynchronous record control, SDK libmov muxer owner and
+  worker-only file I/O. Record and RTSP subscribe to the same VENC/AENC owner,
+  with separate queues. UI exposes both independent states/busy/stop operations.
+  Clips start on IDR, stop at 15s of PTS or a user STOP, drain accepted tails,
+  align to the first IDR epoch and clip G711A leading/trailing samples. Only
+  successful finalization renames .mp4.part to .mp4; failed parts remain logged.
+- Decisions: bypass kd_mp4 wrapper (ignored write/close errors and incorrect
+  G711U insertion path), not the SDK container implementation. Use actual
+  libmov/libflv with checked file callbacks and no FASTSTART relocation. A
+  small build-local end-track extension fixes stock last stts delta=1ms versus
+  estimated mdhd duration and its uninitialized-sentinel assertion order.
+  SDK stays read-only; touch/display baseline bytes remain unchanged.
+- Timing: audio is held until video confirms its full packet window; final tail
+  uses 125us sample clipping. Writer API takes milliseconds, retaining a common
+  epoch with <=1ms rounding. End track timestamps derive from actual written bytes
+  and video interval. Fixed H264 source has no reordered B frames (PTS=DTS).
+- Validation: Docker `bash tools/build.sh little`, `media`, `rtsp`, `test`,
+  `verify`. Native real SDK muxer/readback checks H264 and PCMA (not PCMU),
+  monotonic PTS, exact clipping bytes, first IDR and final durations; /dev/full
+  exercises both write and moov-close failure. A narrow codec adapter checks
+  one shared startup, idempotence, each stop order and absent-frame timeout.
+  Automatic recording consumes 15s of accelerated PTS (450 video frames and
+  120000 audio samples), not a long wall-clock test.
+- Sample evidence: container has no preinstalled ffmpeg and SDK test.mp4 files
+  are empty. Built test-only x264 library/sample generator and minimal native
+  FFmpeg from available SDK sources into out; no downloads or board access.
+  FFprobe verifies 1280x720 H264 + pcm_alaw/8000/mono; independent FFmpeg -xerror
+  decode verifies the 0.5s clipped file and 15s automatic file. Test tools/sample
+  files are not shipped. Logs: out/build-record.log, out/test-media.log,
+  out/test-record-regression.log, out/test-record-rtsp.log, out/verify-record.log.
+- Unverified/risks: hardware encode/audio clocks, actual camera/AI/RTSP/MP4
+  concurrency, VLC, LCD blending and shutdown remain board gates. Native sample
+  bytes are x264-generated, not a capture from this pipeline. Docker builds
+  intermittently report generated-file times about 1.8s in the future; logs
+  retain those warnings. Changed business objects were rebuilt and actual
+  tests/decode executed; this does not replace the final clean package build.
+  Known big ELF section-table warning remains unresolved; header predicates are
+  not loader acceptance. No claim the old board preview has been repaired.
+- Next: metrics and actual LVGL render, resolve big ELF loader/structure concern,
+  then commit-based package/startup/model/library metadata and final scope audit.

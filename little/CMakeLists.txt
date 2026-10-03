@@ -6,9 +6,10 @@ set(CDK "${SDK}/src/common/cdk/user")
 set(MPP "${SDK}/src/big/mpp")
 set(LIVE "${CDK}/thirdparty/live")
 set(LVGL_ROOT "$ENV{LVGL_ROOT}")
+include("${CMAKE_CURRENT_SOURCE_DIR}/../tools/mp4.cmake")
 add_executable(media_service media/main.cpp media/vision_client.cpp
     media/source.cpp media/source_frames.cpp media/live_source.cpp media/rtsp_stream.cpp
-    media/rtsp.cpp ../common/frame.cpp ../common/frame_queue.cpp)
+    media/rtsp.cpp media/recorder.cpp media/mp4_sink.cpp ../common/frame.cpp ../common/frame_queue.cpp)
 target_compile_definitions(media_service PRIVATE NO_OPENSSL=1)
 target_compile_options(media_service PRIVATE -Wall -Wextra)
 target_include_directories(media_service PRIVATE ../common
@@ -22,7 +23,7 @@ target_link_directories(media_service PRIVATE "${CDK}/mapi/mediaclient/lib"
 target_link_directories(media_service PRIVATE "${LIVE}/liveMedia" "${LIVE}/groupsock"
     "${LIVE}/UsageEnvironment" "${LIVE}/BasicUsageEnvironment")
 target_link_libraries(media_service PRIVATE -Wl,--start-group mapi ipcmsg datafifo
-    liveMedia groupsock BasicUsageEnvironment UsageEnvironment pthread -Wl,--end-group)
+    liveMedia groupsock BasicUsageEnvironment UsageEnvironment sdk_mp4 pthread -Wl,--end-group)
 set(PORT "${CMAKE_CURRENT_SOURCE_DIR}/../compat/lvgl_port")
 file(GLOB_RECURSE LVGL_SOURCES "${LVGL_ROOT}/src/*.c")
 if(NOT LVGL_SOURCES)

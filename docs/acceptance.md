@@ -12,8 +12,10 @@
   GOP recovery, first/last ownership and cleanup fixture; shared PTS/clip logic.
 - [x] live555 worker/API cross-build and real SDK loopback DESCRIBE/SETUP/PLAY,
   interleaved H264 multislice RTP markers/PCMA bytes, PTS/bounds and port/deadline checks.
-- [ ] Independent queues, first/last source ownership, PTS and MP4 close checks.
-- [ ] Decodable sample stream/library MP4 checks and single-page LVGL rendering.
+- [x] Independent queues, first/last source ownership, PTS and actual MP4 close checks.
+- [x] Real x264 sample + SDK muxer/readback + independent FFmpeg decode,
+  0.5s sample-clipped and 15s automatically finalized H264/G711A files; shared-source stop orders.
+- [ ] Single-page actual LVGL rendering and final measured-metric integration.
 - [ ] Commit-based application package, ELF/library/model hashes and startup scripts.
 
 ## Board Gates (All Pending)

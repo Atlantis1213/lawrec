@@ -59,3 +59,17 @@ Linux now links the compatible host archive, as the old project does. No SDK
 files, compiler versions or ELF attributes were changed/stripped. Big integration
 also uses the existing host archive; successful linkage does not prove either
 core's IPC transport or runtime ABI on hardware.
+
+## Private MP4 Build
+
+Linux media compiles the existing CDK `middleware/mp4_format/src/libmov` and
+`libflv` sources instead of the unchecked high-level kd_mp4 wrapper. Library
+source copies live only in `out/*/sdk-mp4`; CRLF is normalized there for a checked
+CMake end-track extension. The patch records explicit final PTS boundaries for
+stts and track duration, and fixes the stock sentinel assertion's evaluation
+order. The original SDK sources and libmp4.a are not modified or installed.
+
+Native x264 and FFmpeg are offline test tools only, copied from SDK big MPP
+middleware sources to `out/tests/native`, configured and built in Docker. No
+network download, host compilation or board update is used. Their binaries and
+generated black-video/G711A sample files are not part of the deployment package.

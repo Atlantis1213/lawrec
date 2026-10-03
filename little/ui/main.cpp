@@ -25,8 +25,8 @@ void stop(int) { running = 0; }
 void clicked(lv_event_t *event) {
     unsigned index = static_cast<unsigned>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(event)));
     std::lock_guard<std::mutex> guard(lock);
-    bool can_stop_rtsp = index == 2 && (snapshot.flags & demo::Rtsp);
-    if (busy || (snapshot.busy & (1U << index)) || (transport_error && !can_stop_rtsp)) return;
+    bool can_stop_media = index >= 2 && (snapshot.flags & (1U << index));
+    if (busy || (snapshot.busy & (1U << index)) || (transport_error && !can_stop_media)) return;
     pending_command = index + 1;
     pending_value = !(snapshot.flags & (1U << index));
     busy = true;
@@ -38,8 +38,8 @@ void refresh(lv_timer_t *) {
         std::snprintf(line, sizeof(line), "%s  %s", names[i], snapshot.busy & (1U << i) ? "WAIT" :
             (snapshot.flags & (1U << i) ? "ON" : "OFF"));
         lv_label_set_text(labels[i], line);
-        bool can_stop_rtsp = i == 2 && (snapshot.flags & demo::Rtsp);
-        if (busy || (snapshot.busy & (1U << i)) || (transport_error && !can_stop_rtsp)) lv_obj_add_state(buttons[i], LV_STATE_DISABLED);
+        bool can_stop_media = i >= 2 && (snapshot.flags & (1U << i));
+        if (busy || (snapshot.busy & (1U << i)) || (transport_error && !can_stop_media)) lv_obj_add_state(buttons[i], LV_STATE_DISABLED);
         else lv_obj_clear_state(buttons[i], LV_STATE_DISABLED);
     }
     if (transport_error)
