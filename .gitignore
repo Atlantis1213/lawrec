@@ -1,0 +1,10 @@
+/out/
+*.kmodel
+*.o
+*.a
+*.so*
+*.elf
+*.mp4
+*.part
+.env
+*.log

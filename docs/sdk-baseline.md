@@ -1,0 +1,43 @@
+# SDK and Hardware Baseline
+
+Captured from the existing workspace, without SDK or board modification.
+
+- Old repository: `/home/atlantis/lawrec`, master,
+  `7c51e46bb177cd9f962b6877d48400dff41b759d`.
+- Old worktree has modified `docs/当前状态.md` and untracked
+  `docs/lawrec_development_plan.md`; both preserved. Plan was copied into docs/plan.md.
+- SDK: `/home/atlantis/k230_sdk` resolves to `/home/atlantis/Workspaces/SDKs/k230_sdk`.
+  Not a Git repository. Do not invent an SDK commit/version.
+- Board: `k230_canmv_lckfb_defconfig`.
+- Docker: `ghcr.io/kendryte/k230_sdk`, image ID
+  `sha256:1f9f6be7e7bf6fdbc2c718a224e0cf23366ddc7e1e4b5dc3083635b3f02fd22c`.
+- LVGL: SDK's existing v8.3.1 extraction, no network download.
+- SDK and toolchains are mounted read-only in the Docker entrypoint.
+
+## Frozen Adaptations
+
+The following source checksums identify the passing panel/input baseline, not
+proof of current camera/AI/media operation. No new touch diagnostics are added.
+
+| File | SHA256 |
+| --- | --- |
+| `patches/st7701.baseline.c` = SDK `src/big/mpp/kernel/connector/src/st7701.c` | `e71f9f6105bbf00fa73202891c1ec8e7c076337c4a3549e607873e00f122cbf2` |
+| `compat/lvgl_port/lv_conf.h` | `65c0f127eb6a50f86e3fc93a2f661ecbec7e017787553a42ac8dbfd37880f776` |
+| `compat/lvgl_port/k230/lv_port_indev.c` | `8ec6ef46baac1fd2360eae851ebafdf7af7cd8d4fcf6bd642f5991e78d1523aa` |
+| `compat/lvgl_port/k230/lv_port_disp.cpp` | `99cd0d4db3116a83344c0e1732c1d03ae4d85029bac1bd8d9a2ec6177e63753b` |
+| SDK `src/big/mpp/userapps/src/connector/mpi_connector.c` | `c0985f3b38fbd7b7bb0c9bb5e74e9ba5b51378feecec3c0f5c3c5ba99da993a9` |
+| SDK Linux `drivers/input/touchscreen/edt-ft5x06.c` | `b5ba2b37bf0d4d819ad041fbb622d4f9182af6a311655053fec2ece525be2536` |
+| SDK kernel `libvicap.a` | `1eecf42cd02ca3c5f40dc87bd57eb0dba59aa246697201e8133a63f609465134` |
+| SDK LVGL `lvgl.h` | `c02cc2657e6d8babae3ce8049b85866f5678244c4568cc9529ead0c0004d6c31` |
+| SDK `.config` | `6fe7d0e29dd9362ea418085b84838b90bdf195bc3e95f8b46e3a254301162912` |
+| SDK Buildroot `.config` | `2f07968d1b7f6e8815aea882d46763a13014aaa2f5bbb69dd6ff99c88c9f2c60` |
+
+Adapter files and font are copied unchanged with original copyright headers.
+`st7701.baseline.c` is a reference snapshot, not compiled or auto-installed.
+Keep panel power/reset/init solely in vision. The candidate must use 27 MHz/div21,
+324 Mbps, n3/m52/voc0x1f/hs0xb5, existing four-lane PHY and normal VO/VTTH=1.
+Linux input keeps existing X reflection. No firmware, clock or touch changes.
+
+The SDK's existing binaries have no comprehensive provenance. Final packaging
+must also capture every shipped application/library/model hash and explicitly
+state that selected file hashes are not a complete SDK backup.
