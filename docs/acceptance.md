@@ -21,8 +21,9 @@
   this is not execution of the board loader.
 - [x] Commit-based clean application package, ELF/library/model hashes and scoped startup scripts.
 
-Offline candidate: code commit `d598a920604739f3793a02d12d8a5fae19cec062`;
-archive `out/releases/d598a9206047-20261003T045524Z/lawrec-demo-d598a9206047.tar.gz`.
+Current Chinese UI candidate: code commit `1cfd6b830686`;
+archive `out/releases/1cfd6b830686-20261003T091916Z/lawrec-demo-1cfd6b830686.tar.gz`.
+The earlier d598a9206047 archive contains the English UI, not the current page.
 Its bundled checklist is the pre-package snapshot; build/verify/runtime/hash
 completion is recorded in its meta files and in the final devlog entry below.
 Documentation-only commits do not change this candidate's application bytes.
@@ -33,6 +34,8 @@ After offline work is complete, start vision, media, UI in that order. Stop in
 reverse order, finishing the recorder before releasing codecs/camera.
 
 - [ ] GC2093 frames and LCD preview; existing touch remains correct.
+- [ ] Chinese labels readable on the physical 3.1-inch panel; four controls and
+  details/return can be tapped without overlap or touch-mapping changes.
 - [ ] AI face boxes/landmarks/count on LCD; AI switch does not stop encoding.
 - [ ] VLC H.264 + G.711A at rtsp://<board-ip>:8554/lawrec.
 - [ ] Audio packets match mono 8 kHz/320 bytes/40 ms; video/audio SDK clocks align,

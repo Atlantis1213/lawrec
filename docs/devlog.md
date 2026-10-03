@@ -347,3 +347,19 @@ Offline development only. No hardware acceptance has been performed for this rep
   board update, media change, timing change or long regression was performed.
   The previous d598a92 archive has the English page; create a new clean package
   from this UI commit before deploying the Chinese version.
+
+### 2026-10-03: Chinese UI Application Candidate Packaged
+
+- Clean `tools/build.sh package` from 1cfd6b830686 completed, including full
+  cross-build, ELF/frozen byte checks, exact model hash and Linux dependency/
+  symbol-version closure. Actual Chinese code/font assets are in demo_ui;
+  ordinary build/package needs neither Node nor the converter cache.
+- New archive: out/releases/1cfd6b830686-20261003T091916Z/
+  lawrec-demo-1cfd6b830686.tar.gz. Its actual SHA256 is recorded in that release's
+  archive.sha256; bundled per-file SHA256SUMS were checked before archive creation.
+  Detailed logs are in the release's build.log, verify.log and runtime.log.
+- The previous English archive remains untouched; use this new package for
+  Chinese UI acceptance. No board connection or installation. Only UI-focused
+  short rendering/glyph/interaction checks were run; media stress was not repeated.
+- This documentation-only follow-up does not change the candidate's application
+  bytes. Physical readability/touch and all prior hardware gates remain pending.
