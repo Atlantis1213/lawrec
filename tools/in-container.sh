@@ -9,11 +9,12 @@ if [ "$1" = package ]; then
     exec bash tools/package.sh
 fi
 if [ "$1" = bundle-check ]; then
-    bash -n tools/package.sh tools/runtime-libs.sh tools/runtime-check.sh
+    bash -n tools/package.sh tools/runtime-libs.sh tools/runtime-check.sh tools/compiler-info.sh
     for script in tools/board/*.sh; do sh -n "$script"; done
     bash tests/scripts_test.sh
     c++ -std=c++17 -Wall -Wextra -Werror tests/elf_check.cpp -o out/tests/elf_check
     bash tests/runtime_test.sh "$BR/host/riscv64-buildroot-linux-gnu/sysroot"
+    bash tools/compiler-info.sh out > out/tests/compiler-info.txt
 fi
 if [ "$1" = elf ]; then
     readelf -W -h -S -l -r out/big/vision.elf > out/elf-inspect.txt

@@ -269,3 +269,16 @@ Offline development only. No hardware acceptance has been performed for this rep
 - Pending: run the fresh package command after committing these tools; record
   the actual archive/hash and clean-build result in the next log entry. All
   hardware gates remain pending; packaging is not an installation or camera fix.
+
+### 2026-10-03: Package Compiler-Provenance Correction
+
+- First clean build from b836570 completed all ELF/frozen/dependency/version-name
+  checks, but archive creation stopped at compiler metadata: the script assumed
+  a Buildroot target-prefix compiler name that this SDK does not provide. No
+  successful archive was reported and no deployment occurred.
+- Fix: derive both compiler paths from the fresh CMake-generated compiler
+  descriptors, not from an inferred target triple/sysroot directory. Retain
+  the partial release's logs under out/releases for traceability.
+- Verification: bundle-check validates the helper's syntax and executes both
+  actually configured compilers with --version in Docker. Final fresh package
+  creation will be recorded only after it succeeds.

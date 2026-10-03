@@ -28,10 +28,7 @@ cp patches/st7701.baseline.c "$BUNDLE/meta/st7701.reference.c"
 printf 'commit=%s\nUTC=%s\nDocker=%s\nSDK=%s\nboard=%s\nprotocol=2\nstate=OFFLINE_ONLY_BOARD_ACCEPTANCE_PENDING\n' \
     "$LAWREC_REVISION" "$STAMP" "$LAWREC_IMAGE_ID" "$K230_SDK_ROOT" "$LAWREC_BOARD" > "$BUNDLE/meta/build.txt"
 printf 'model_source=%s\nmodel_sha256=%s\n' "$MODEL" "$EXPECTED" >> "$BUNDLE/meta/build.txt"
-{
-    riscv64-unknown-linux-musl-g++ --version
-    "$SYSROOT/../../bin/riscv64-buildroot-linux-gnu-g++" --version
-} > "$BUNDLE/meta/compilers.txt"
+bash tools/compiler-info.sh "$LAWREC_BUILD_ROOT" > "$BUNDLE/meta/compilers.txt"
 chmod +x "$BUNDLE"/*.sh "$BUNDLE"/bin/* "$BUNDLE/lib/ld-linux-riscv64xthead-lp64d.so.1"
 (cd "$BUNDLE"; find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
 (cd "$BUNDLE"; sha256sum -c SHA256SUMS > /dev/null)
