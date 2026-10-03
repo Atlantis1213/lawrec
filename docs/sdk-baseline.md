@@ -41,3 +41,21 @@ Linux input keeps existing X reflection. No firmware, clock or touch changes.
 The SDK's existing binaries have no comprehensive provenance. Final packaging
 must also capture every shipped application/library/model hash and explicitly
 state that selected file hashes are not a complete SDK backup.
+
+## IPC Archive Selection
+
+This local SDK's directory names/config.mk do not reliably identify the actual
+prebuilt compiler variant. Follow inspected archive metadata and the old Linux
+build's explicit selection, not an assumption that Linux must use slave/lib:
+
+- Linux-compatible ipcmsg/host/lib/libipcmsg.a: GCC 10.2 Xuantie V2.6,
+  rv64imafdc/xthead attributes, SHA256
+  `d1b1ecae0434cc4376fa238560355bf201c07a0499bb1144e138d6b6972759a2`.
+- ipcmsg/slave/lib/libipcmsg.a: GCC 12 prerelease, vector 1.0/Zve attributes,
+  SHA256 `37b59409b696ef5c1f15ab7b12c1c2b4967f630d07fd77e63a341abb26a73342`.
+  Linking it with the existing Linux V2.6 toolchain fails (unknown Zve extension).
+
+Linux now links the compatible host archive, as the old project does. No SDK
+files, compiler versions or ELF attributes were changed/stripped. Big integration
+also uses the existing host archive; successful linkage does not prove either
+core's IPC transport or runtime ABI on hardware.

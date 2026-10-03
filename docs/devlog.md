@@ -51,3 +51,41 @@ Offline development only. No hardware acceptance has been performed for this rep
   deliberately preserved rather than reformatted during import.
 - Next: SDK IPC between media and vision; initialize one MobileRetinaFace model,
   AI2D/KPU timings and rotated OSD overlay, then shared video/audio sources.
+
+### 2026-10-03: Preview Report Triage And AI/Control Integration
+
+- Changes: corrected VICAP CHN0 to YUV semiplanar 420 while retaining the SDK
+  VO layer's distinct YVU planar convention. Old code used the VO enum for
+  capture and logged an ISP default-format fallback. The new pipeline retains
+  its pre-start binding and layer-only preview switches. Recorded the old board
+  report in acceptance without claiming a hardware root cause or repair.
+- Changes: added one model owner, AI2D letterbox, KPU runtime, nine-head face
+  decoder, bounded NMS and clockwise portrait mapping; dedicated OSD2/CHN5
+  boxes, landmarks and count with two private buffers. Added SDK IPC snapshots
+  and main-thread command ACK; Linux forwards preview/AI/status, leaving codecs
+  explicitly ENOSYS. UI keeps failed-operation feedback across polling.
+- Safety: SDK buffers remain allocated after an unconfirmed OSD disable, including
+  insert-success/enable-failure. Shutdown skips camera/VB/MAPI teardown when OSD
+  ownership is retained. Successful service polls preserve asynchronous AI errors.
+- Decision: preserve all frozen display/touch/kernel bytes and their existing
+  vblank behavior. CHN0 NOTREADY and a CHN1 frame do not establish visible preview;
+  vblank warning alone does not establish a UI crash. No SDK mutation, board
+  connection, deployment or old-project edits.
+- Build issue: initial Linux IPC link failed because slave/lib uses GCC12 vector1/Zve
+  attributes, incompatible with Linux's GCC10/V2.6 linker. Inspected archives in
+  Docker and matched the old Linux build's explicit host/lib selection. Kept
+  toolchain/SDK unchanged; no metadata stripping or incompatible-link suppression.
+- Validation: Docker `bash tools/build.sh big`, `little`, `test`, `verify` passed.
+  Pure decoder test compares all 4200 priors with SDK anchors and checks logits,
+  NMS, padding, NaN/Inf and portrait mapping. Narrow camera fixture checks capture
+  versus VO formats/order; IPC fixture checks malformed body/module, busy slot,
+  delayed ACK, shutdown and retained errors; OSD fixture checks layer, transparent
+  pixels and resource retention. These are not hardware simulations or acceptance.
+  Logs: out/build-integration.log, out/build-ipc-fixed.log,
+  out/test-integration.log and out/verify-integration.log.
+- Remaining: SDK header 'KMDL' warning and the pre-existing ELF section sh_entsize
+  issue (now section 2305) remain. Verify passes header predicates/frozen hashes,
+  not full ELF structural or loader validation. Actual model loading, three-channel
+  delivery, KPU, OSD scanout/blending, vblank events and preview remain unverified.
+- Next: one shared H.264/G.711A source and bounded independent RTSP/MP4 queues;
+  real media, final page rendering and deployment bundle remain unfinished.

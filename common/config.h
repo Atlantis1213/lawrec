@@ -12,6 +12,7 @@ constexpr unsigned stream_block_bytes = (video_width * video_height * 3 / 4 + 40
 constexpr unsigned rtsp_port = 8554;
 constexpr const char *rtsp_name = "lawrec";
 constexpr const char *ipc_service = "lawrec_demo";
+constexpr unsigned ipc_port = 102;
 constexpr const char *socket_path = "/var/run/lawrec-demo.sock";
 constexpr const char *record_directory = "/sharefs/lawrec_records";
 }

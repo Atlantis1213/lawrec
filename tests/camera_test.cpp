@@ -40,7 +40,8 @@ k_s32 kd_mpi_connector_init(k_s32, k_connector_info info) {
 }
 k_s32 kd_mpi_vo_set_video_layer_attr(k_vo_layer layer, k_vo_video_layer_attr *attr) {
     assert(layer == K_VO_LAYER1 && attr->img_size.width == 480 && attr->img_size.height == 800);
-    assert(attr->func == K_ROTATION_90); return 0;
+    assert(attr->func == K_ROTATION_90 && attr->pixel_format == PIXEL_FORMAT_YVU_PLANAR_420);
+    return 0;
 }
 k_s32 kd_mpi_vo_enable_video_layer(k_vo_layer) { ++enables; return 0; }
 k_s32 kd_mpi_vo_disable_video_layer(k_vo_layer) { ++disables; return 0; }
@@ -56,6 +57,7 @@ void kd_mpi_vicap_set_dump_reserved(k_vicap_dev, k_vicap_chn channel, k_bool res
 k_s32 kd_mpi_vicap_set_chn_attr(k_vicap_dev, k_vicap_chn channel, k_vicap_chn_attr attr) {
     assert(attr.chn_enable && attr.buffer_num == demo::capture_buffers);
     assert(attr.buffer_size <= pools.comm_pool[channel].blk_size);
+    if (channel == 0) assert(attr.pix_format == PIXEL_FORMAT_YUV_SEMIPLANAR_420 && !dump_reserved[0]);
     if (channel == 1) assert(attr.pix_format == PIXEL_FORMAT_RGB_888_PLANAR && dump_reserved[1]);
     if (channel == 2) assert(attr.pix_format == PIXEL_FORMAT_YUV_SEMIPLANAR_420 && !dump_reserved[2]);
     return channel == 2 ? attr_error : 0;

@@ -7,6 +7,7 @@
 namespace demo {
 // Both SDK targets are little-endian; all fields are 32-bit, no pointers/padding.
 constexpr uint32_t magic = 0x4c564431, version = 1;
+constexpr uint32_t vision_module = 0x56495331;
 enum class Command : uint32_t { GetStatus = 0, SetPreview, SetAi, SetRtsp, SetRecord };
 enum Flag : uint32_t { Preview = 1, Ai = 2, Rtsp = 4, Record = 8 };
 struct Request {

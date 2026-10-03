@@ -4,8 +4,10 @@
 
 - [x] Three RISC-V skeleton programs cross-compile/link in K230 Docker.
 - [x] Protocol lengths/version/commands and Unix socket mock checks.
-- [ ] SDK three-channel, buffer, stride and MAPI API integration.
-- [ ] AI2D/model input, decoder, NMS, rotation/coordinate checks.
+- [x] SDK camera/buffer/stride API cross-build and focused ownership/order fixture.
+- [x] AI2D/KPU SDK integration cross-build; model head checks, priors, NMS and coordinates.
+- [x] SDK IPC cross-build; malformed bodies, pending command/ACK and retained errors fixture.
+- [x] OSD cross-build; buffer retention on failed enable/disable fixture.
 - [ ] Independent queues, first/last source ownership, PTS and MP4 close checks.
 - [ ] Real live555/library/sample stream checks and single-page LVGL rendering.
 - [ ] Commit-based application package, ELF/library/model hashes and startup scripts.
@@ -24,3 +26,27 @@ reverse order, finishing the recorder before releasing codecs/camera.
 
 Compiling or exercising mock switches cannot check any board gate. Do not reflash,
 change networking or change the passing touch/display driver during offline development.
+
+## Existing Board Report: Not A New-Demo Pass
+
+The user's old `/app/lawrec/ui/ui` report contains a successful VI0->VO1 bind,
+CHN0 dump error `0xa0158010`, one CHN1 1280x720 YUV frame and Linux
+`CRTC vblank wait timed out`. This is old-program evidence, not a run of vision.
+
+- `0xa0158010` maps to VICAP NOTREADY (16), not an allocation error or proof
+  that the whole camera is stopped. Bound CHN0's user dump and its VO feed
+  are different delivery paths. One CHN1 frame proves only that frame existed.
+- New capture follows sample_vicap's supported semiplanar YUV format and
+  binds before VICAP init/start. Preview OFF only gates the layer; it does
+  not repeatedly unbind or insert an idle frame over the capture stream.
+- A Linux vblank warning means DRM's wait missed its event. The inspected
+  driver's enable_vblank changes a software flag; its IRQ handler then calls
+  drm_crtc_handle_vblank. This warning alone neither proves a crash nor identifies
+  the failing VI/VO stage. Check actual IRQ progression and visible output at
+  final acceptance; no kernel/VTTH/clock changes or disabled-wait workaround.
+- With new programs, confirm preview ON/OFF does not unbind VI0->VO1, verify
+  visible camera motion, then enable AI independently to verify RGB delivery.
+  UI button/state acknowledgement alone is insufficient. No long tests needed.
+
+The black-screen root cause has not been confirmed on hardware. These changes
+remove known source/configuration differences; they do not certify a repair.

@@ -32,7 +32,7 @@ esac
 if [ "$1" = test ]; then
     mkdir -p out/tests
     c++ -std=c++17 -Wall -Wextra -Werror -Icommon tests/protocol_test.cpp -o out/tests/protocol_test
-    c++ -std=c++17 -Wall -Wextra -Werror -Icommon little/media/main.cpp -o out/tests/mock_service
+    c++ -std=c++17 -Wall -Wextra -Werror -DDEMO_SOCKET_FIXTURE=1 -Icommon little/media/main.cpp -o out/tests/mock_service
     c++ -std=c++17 -Wall -Wextra -Werror -Icommon tests/socket_test.cpp common/socket.cpp -o out/tests/socket_test
     out/tests/protocol_test
     out/tests/socket_test out/tests/mock_service
@@ -41,4 +41,15 @@ if [ "$1" = test ]; then
         -I"$MPP/include/comm" -I"$MPP/userapps/api" \
         tests/camera_test.cpp big/camera.cpp -o out/tests/camera_test
     out/tests/camera_test
+    c++ -std=c++17 -Wall -Wextra -Werror -Icommon tests/faces_test.cpp common/faces.cpp \
+        "$SDK/src/big/nncase/examples/image_face_detect/anchors_320.cc" -o out/tests/faces_test
+    out/tests/faces_test
+    c++ -std=c++17 -Wall -Wextra -Werror -pthread -Icommon -Ibig -I"$MPP/include" \
+        -I"$MPP/include/comm" -I"$SDK/src/common/cdk/user/component/ipcmsg/include" \
+        tests/control_test.cpp big/control.cpp -o out/tests/control_test
+    out/tests/control_test
+    c++ -std=c++17 -Wall -Wextra -Werror -Icommon -Ibig -I"$MPP/include" \
+        -I"$MPP/include/comm" -I"$MPP/userapps/api" \
+        tests/osd_test.cpp big/osd.cpp common/faces.cpp -o out/tests/osd_test
+    out/tests/osd_test
 fi

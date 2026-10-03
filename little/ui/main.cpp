@@ -15,6 +15,8 @@ volatile sig_atomic_t running = 1;
 std::mutex lock;
 demo::Status snapshot;
 int transport_error = -ENOTCONN;
+int operation_error = 0;
+uint32_t operation_command = 0;
 uint32_t pending_command = 0, pending_value = 0;
 bool busy = false;
 lv_obj_t *labels[4], *buttons[4], *summary;
@@ -23,22 +25,27 @@ void stop(int) { running = 0; }
 void clicked(lv_event_t *event) {
     unsigned index = static_cast<unsigned>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(event)));
     std::lock_guard<std::mutex> guard(lock);
-    if (busy || transport_error || snapshot.result) return;
+    if (busy || transport_error) return;
     pending_command = index + 1;
     pending_value = !(snapshot.flags & (1U << index));
     busy = true;
 }
 void refresh(lv_timer_t *) {
     std::lock_guard<std::mutex> guard(lock);
-    char line[192];
+    char line[256];
     for (unsigned i = 0; i < 4; ++i) {
         std::snprintf(line, sizeof(line), "%s  %s", names[i], snapshot.flags & (1U << i) ? "ON" : "OFF");
         lv_label_set_text(labels[i], line);
-        if (busy || transport_error || snapshot.result) lv_obj_add_state(buttons[i], LV_STATE_DISABLED);
+        if (busy || transport_error) lv_obj_add_state(buttons[i], LV_STATE_DISABLED);
         else lv_obj_clear_state(buttons[i], LV_STATE_DISABLED);
     }
-    if (transport_error || snapshot.result)
-        std::snprintf(line, sizeof(line), "Backend error: %d\nHardware not ready", transport_error ? transport_error : snapshot.result);
+    if (transport_error)
+        std::snprintf(line, sizeof(line), "Backend error: %d\nHardware not ready", transport_error);
+    else if (operation_error)
+        std::snprintf(line, sizeof(line), "%s request failed: %d\nTry another operation; codecs may be unavailable",
+            names[operation_command - 1], operation_error);
+    else if (snapshot.last_error)
+        std::snprintf(line, sizeof(line), "Vision/media error: %d\nCheck vision and media logs", snapshot.last_error);
     else std::snprintf(line, sizeof(line), "Faces %u | AI %.1f ms | %.1f fps\nVideo %u kbps%s",
         snapshot.detections, snapshot.total_us / 1000.0, snapshot.ai_fps_milli / 1000.0,
         snapshot.bitrate_kbps, busy ? " | Working..." : "");
@@ -59,9 +66,13 @@ void communications() {
         int result = demo::exchange(demo::socket_path, request, next);
         {
             std::lock_guard<std::mutex> guard(lock);
-            transport_error = result;
+            if (!request.command) transport_error = result ? result : next.result;
             if (!result) snapshot = next;
-            if (request.command) busy = false;
+            if (request.command) {
+                operation_command = request.command;
+                operation_error = result ? result : next.result;
+                busy = false;
+            }
         }
         for (int i = 0; i < 5 && running; ++i) usleep(100000);
     }

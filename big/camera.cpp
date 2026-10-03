@@ -99,8 +99,9 @@ int Camera::setup_capture() {
         attr.crop_win = device.acq_win; attr.scale_win = attr.out_win;
         attr.crop_enable = K_FALSE; attr.scale_enable = K_FALSE;
         attr.chn_enable = K_TRUE; attr.buffer_num = capture_buffers;
-        attr.pix_format = i == rgb_channel ? PIXEL_FORMAT_RGB_888_PLANAR :
-            i == preview_channel ? PIXEL_FORMAT_YVU_PLANAR_420 : PIXEL_FORMAT_YUV_SEMIPLANAR_420;
+        // VICAP output and VO layer use different SDK format conventions.
+        // Match sample_vicap: capture YUV semiplanar, VO layer YVU planar.
+        attr.pix_format = i == rgb_channel ? PIXEL_FORMAT_RGB_888_PLANAR : PIXEL_FORMAT_YUV_SEMIPLANAR_420;
         attr.buffer_size = align(attr.out_win.width * attr.out_win.height * 3 /
             (i == rgb_channel ? 1 : 2));
         // SDK sample reserves dump output explicitly. Only AI needs user dumps.

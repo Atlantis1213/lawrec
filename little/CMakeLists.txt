@@ -5,14 +5,14 @@ set(SDK "$ENV{K230_SDK_ROOT}")
 set(CDK "${SDK}/src/common/cdk/user")
 set(MPP "${SDK}/src/big/mpp")
 set(LVGL_ROOT "$ENV{LVGL_ROOT}")
-add_executable(media_service media/main.cpp)
+add_executable(media_service media/main.cpp media/vision_client.cpp)
 target_compile_options(media_service PRIVATE -Wall -Wextra)
 target_include_directories(media_service PRIVATE ../common
     "${MPP}/include" "${MPP}/include/comm" "${MPP}/userapps/api"
     "${CDK}/mapi/include" "${CDK}/mapi/include/api" "${CDK}/mapi/include/comm"
     "${CDK}/component/ipcmsg/include" "${CDK}/component/datafifo/include")
 target_link_directories(media_service PRIVATE "${CDK}/mapi/mediaclient/lib"
-    "${CDK}/component/ipcmsg/slave/lib" "${CDK}/component/datafifo/slave/lib")
+    "${CDK}/component/ipcmsg/host/lib" "${CDK}/component/datafifo/slave/lib")
 target_link_libraries(media_service PRIVATE -Wl,--start-group mapi ipcmsg datafifo pthread -Wl,--end-group)
 set(PORT "${CMAKE_CURRENT_SOURCE_DIR}/../compat/lvgl_port")
 file(GLOB_RECURSE LVGL_SOURCES "${LVGL_ROOT}/src/*.c")

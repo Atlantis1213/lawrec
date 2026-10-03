@@ -1,5 +1,8 @@
 #include "config.h"
 #include "protocol.h"
+#ifndef DEMO_SOCKET_FIXTURE
+#include "vision_client.h"
+#endif
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
@@ -52,7 +55,12 @@ int main(int argc, char **argv) {
     chmod(path, 0600);
     signal(SIGINT, stop); signal(SIGTERM, stop);
     demo::Status status;
-    std::fprintf(stderr, "[media] mode=%s socket=%s\n", mock ? "MOCK, no hardware" : "skeleton", path);
+    int backend_error = -ENOSYS;
+#ifndef DEMO_SOCKET_FIXTURE
+    demo::VisionClient vision;
+    if (!mock) backend_error = vision.start();
+#endif
+    std::fprintf(stderr, "[media] mode=%s socket=%s backend_init=%d\n", mock ? "MOCK, no hardware" : "vision IPC, codecs pending", path, backend_error);
     while (running) {
         pollfd listener{server, POLLIN, 0};
         if (poll(&listener, 1, 100) <= 0) continue;
@@ -64,12 +72,24 @@ int main(int argc, char **argv) {
             ssize_t bytes = recv(client, &request, sizeof(request), MSG_TRUNC);
             if (bytes >= 0 && demo::decode_request(&request, static_cast<size_t>(bytes), request)) {
                 status.id = request.id;
-                status.result = mock ? 0 : -ENOSYS;
+                status.result = mock ? 0 : backend_error;
                 if (mock && request.command) {
                     uint32_t flag = 1U << (request.command - 1);
                     status.flags = request.value ? status.flags | flag : status.flags & ~flag;
                 }
-                status.last_error = status.result;
+#ifndef DEMO_SOCKET_FIXTURE
+                if (!mock && !backend_error) {
+                    if (request.command > uint32_t(demo::Command::SetAi)) status.result = -ENOSYS;
+                    else {
+                        demo::Status answer;
+                        int ret = vision.exchange(request, answer);
+                        if (ret) status.result = ret;
+                        else status = answer;
+                    }
+                }
+#endif
+                // Preserve asynchronous vision errors across successful polling.
+                if (status.result) status.last_error = status.result;
                 ssize_t sent = send(client, &status, sizeof(status), MSG_NOSIGNAL);
                 if (sent != sizeof(status)) std::fprintf(stderr, "[media] reply failed errno=%d\n", errno);
             }
@@ -77,5 +97,11 @@ int main(int argc, char **argv) {
         close(client);
     }
     close(server); unlink(path); close(lock);
+#ifndef DEMO_SOCKET_FIXTURE
+    int cleanup = vision.stop();
+    if (cleanup) std::fprintf(stderr, "[media] IPC shutdown failed=%d\n", cleanup);
+    return cleanup ? 1 : 0;
+#else
     return 0;
+#endif
 }
