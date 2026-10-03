@@ -19,7 +19,13 @@
 - [x] AI times/FPS, callback video FPS/bitrate, queue depth, media CPU/RSS and configured VB budget integration.
 - [x] Clean readelf output, full ELF table sizes and static RT-Smart mapping/entry/relocation checks;
   this is not execution of the board loader.
-- [ ] Commit-based application package, ELF/library/model hashes and startup scripts.
+- [x] Commit-based clean application package, ELF/library/model hashes and scoped startup scripts.
+
+Offline candidate: code commit `d598a920604739f3793a02d12d8a5fae19cec062`;
+archive `out/releases/d598a9206047-20261003T045524Z/lawrec-demo-d598a9206047.tar.gz`.
+Its bundled checklist is the pre-package snapshot; build/verify/runtime/hash
+completion is recorded in its meta files and in the final devlog entry below.
+Documentation-only commits do not change this candidate's application bytes.
 
 ## Board Gates (All Pending)
 

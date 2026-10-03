@@ -282,3 +282,42 @@ Offline development only. No hardware acceptance has been performed for this rep
 - Verification: bundle-check validates the helper's syntax and executes both
   actually configured compilers with --version in Docker. Final fresh package
   creation will be recorded only after it succeeds.
+
+### 2026-10-03: Offline Demo Delivery Complete, Board Acceptance Pending
+
+- Actual clean package command: `bash tools/build.sh package`, exit 0. Source
+  commit d598a920604739f3793a02d12d8a5fae19cec062; clean Git worktree at build.
+  Fresh output: out/releases/d598a9206047-20261003T045524Z, not the earlier
+  incomplete b836570 release. The archive is an application bundle (~11 MiB),
+  not an SD image and not something to flash.
+- Archive: lawrec-demo-d598a9206047.tar.gz. SHA256:
+  f4e00d0664b0e2ec7e9b76829461ca7d0c055f43dc8f6a69ed2a229da0f301a1.
+  Programs: vision.elf, media_service, demo_ui, democtl. Ten private dynamic
+  libraries/loader, verified single model, scoped scripts, docs, provenance,
+  real compiler paths/versions and per-file SHA256SUMS are included. Package
+  creation verifies all file hashes before tar; no host compiler or board access.
+- Clean build/verify/runtime logs are in that release and archive meta/. No
+  clock-skew or ELF section-size warnings in this build. The SDK nncase header's
+  existing multicharacter model-tag warning remains visible; no suppression or
+  SDK source edits. Both compiler-version commands executed in Docker.
+- Final short offline checks: out/test-final.log (protocol/socket/camera/AI/
+  IPC/OSD/queues/PTS/metrics/source), out/test-final-rtsp.log (real live555
+  synthetic RTP transport), out/test-final-media.log (actual SDK muxer/readback
+  and independent H264/PCMA decode), out/test-ui.log (actual LVGL rendering),
+  out/test-compiler-provenance.log (scripts/dependencies/version names). All
+  passed. Synthetic camera/codec fixtures are clearly labeled, not hardware runs.
+- Scope audit: all plan modules have real code/control/build wiring: independent
+  preview/RGB AI/encode channels; one model AI2D/KPU/NMS/OSD; one H264/PCMA source
+  with independent RTSP/15s MP4; asynchronous one-page LVGL + socket/SDK IPC;
+  measured rates/times/queues/media CPU/RSS/VB budget; deployable candidate and
+  start/stop/VLC/model/library/checksum instructions. Business C++/headers total
+  2837 lines, excluding tests, SDK and frozen adapter. No WiFi, settings, playback,
+  face identity DB or general recovery framework is imported.
+- Remaining: **every board gate is pending**. Only a short joint preview/AI/
+  RTSP/record/sound/normal-stop pass is required, not a soak. In particular, the
+  old lawrec CHN0 dump/vblank report does not certify a fix of its black screen;
+  camera delivery, RGB/VENC concurrency, LCD blending, KPU runtime, audio clock,
+  actual ELF loading and VLC still require actual board observations.
+- This final documentation commit changes no application bytes. The bundle's
+  checklist was captured just before packaging; meta/ contains actual completed
+  clean-build/verification evidence. Old repository user changes remain intact.

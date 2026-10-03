@@ -12,8 +12,9 @@ cross-compile. **All hardware operation remains unverified.**
 live555 H.264/G.711A RTSP consumer and an independent MP4 recorder from the
 same encoder/audio source. Both are wired to the one-page UI. Offline mux/decode
 and loopback RTP tests are not hardware/VLC acceptance. Actual LVGL rendering
-and measured metrics are integrated. Packaging/startup tools are present;
-hardware acceptance remains pending.
+and measured metrics are integrated. The clean application candidate is generated;
+see the final [development log](docs/devlog.md) entry for its path/hash.
+Hardware acceptance remains pending.
 `--mock SOCKET` is exclusively an offline control fixture; never deploy it as media.
 
 ## Ownership
