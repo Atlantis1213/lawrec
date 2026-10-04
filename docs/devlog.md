@@ -537,3 +537,28 @@ Offline development only. No hardware acceptance has been performed for this rep
   Queue/metrics/RTP/decode proofs do not certify a visible screen or every
   vblank wait. Deployment/acceptance docs now permit joint preview instead of
   instructing users to keep it OFF. Business IPC still needs paired restarts.
+
+### 2026-10-04: Preview Fix Final Package Deployed
+
+- Clean tools/build.sh package for a4cb498f2bfd passed. Release:
+  out/releases/a4cb498f2bfd-20261004T123709Z/lawrec-demo-a4cb498f2bfd.tar.gz.
+  Archive SHA256: afa301d5c4475cf667411b7b53a990f754c6ca2a33c52c461388ab81586e0557.
+- Extract initially ran out of space on the 256MiB /sharefs partition, while
+  both applications were stopped. Downloaded the older before-fc9d28a backup
+  to out/board-backups/lawrec-demo-before-fc9d28a.tar.gz and verified all 47
+  actual files against its remote SHA manifest before removing that redundant
+  remote backup. Removed this task's inactive diagnostic ELFs only. Preserved
+  recordings/models and the recent /sharefs/lawrec-demo-before-a4cb498 rollback
+  tree; no SD reflash or system/network changes.
+- Re-extracted the complete paired package to /sharefs/lawrec-demo; every remote
+  SHA256SUMS entry passed. /sharefs now has 50096KiB free (81% used), sufficient
+  for a short demo clip. Evidence: out/board-preview-final-hashes.log.
+- Started standard bin/vision.elf on COM5 (ready=0, frame-end IRQ enabled),
+  then Linux start.sh. Left preview/AI/RTSP ON and recording OFF (flags=7).
+  A subsequent SSH sh run.sh democtl status returned result=0, busy=0, error=0,
+  AI=30.332fps and video=29.847fps. Logs out/board-preview-final-start.log,
+  board-preview-final-controls.log and board-preview-final-status.log.
+- No repeated recording/stress test. Asked the user for one physical LCD motion
+  and optional face-box check; these remain pending, not certified by metrics.
+  RTSP available at rtsp://192.168.123.74:8554/lawrec. Source/documentation commits
+  remain local; no automatic push.
