@@ -1,72 +1,57 @@
-# Acceptance
+# Demo 验收状态
 
-## Offline Gates
+## 离线检查
 
-- [x] Three RISC-V skeleton programs cross-compile/link in K230 Docker.
-- [x] Protocol lengths/version/commands and Unix socket mock checks.
-- [x] SDK camera/buffer/stride API cross-build and focused ownership/order fixture.
-- [x] AI2D/KPU SDK integration cross-build; model head checks, priors, NMS and coordinates.
-- [x] SDK IPC cross-build; malformed bodies, pending command/ACK and retained errors fixture.
-- [x] OSD cross-build; buffer retention on failed enable/disable fixture.
-- [x] VENC/AENC real API cross-build; callback copying, separate consumer queues,
-  GOP recovery, first/last ownership and cleanup fixture; shared PTS/clip logic.
-- [x] live555 worker/API cross-build and real SDK loopback DESCRIBE/SETUP/PLAY,
-  interleaved H264 multislice RTP markers/PCMA bytes, PTS/bounds and port/deadline checks.
-- [x] Independent queues, first/last source ownership, PTS and actual MP4 close checks.
-- [x] Real x264 sample + SDK muxer/readback + independent FFmpeg decode,
-  0.5s sample-clipped and 15s automatically finalized H264/G711A files; shared-source stop orders.
-- [x] Single-page actual LVGL rendering, transparency/layout/commands/busy/error checks.
-- [x] AI times/FPS, callback video FPS/bitrate, queue depth, media CPU/RSS and configured VB budget integration.
-- [x] Clean readelf output, full ELF table sizes and static RT-Smart mapping/entry/relocation checks;
-  this is not execution of the board loader.
-- [x] Commit-based clean application package, ELF/library/model hashes and scoped startup scripts.
+- [x] 三个业务程序在 K230 SDK Docker 内交叉构建；ELF、加载区间及固定适配代码校验。
+- [x] 控制协议、Unix socket、命令 ACK、错误保留和异常消息检查。
+- [x] 摄像头/缓冲区资源归属、预览绑定开关及停止顺序的针对性模拟检查。
+- [x] AI2D/KPU 集成、模型输出、先验框、NMS、坐标及 OSD 缓冲归属检查。
+- [x] IPC 待连接返回值、真实失败释放及 MAPI 等待可取消检查。
+- [x] 编码回调复制、独立队列、PTS、首末消费者及资源清理检查。
+- [x] live555 TCP H.264/G.711A 回环接收、RTP 标记、大小和超时检查。
+- [x] 真实 x264 样本、SDK MP4 封装/回读及独立 FFmpeg 解码；包括 SPS/PPS ID 改变、15 秒自动结束和消费者停止顺序。
+- [x] 单页中文 LVGL 渲染、字号、触摸目标、透明预览区、详情弹窗及忙碌/错误交互检查。
+- [x] 应用包运行库依赖、模型哈希和限定进程身份的启动/停止脚本检查。
 
-Current Chinese UI candidate: code commit `1cfd6b830686`;
-archive `out/releases/1cfd6b830686-20261003T091916Z/lawrec-demo-1cfd6b830686.tar.gz`.
-The earlier d598a9206047 archive contains the English UI, not the current page.
-Its bundled checklist is the pre-package snapshot; build/verify/runtime/hash
-completion is recorded in its meta files and in the final devlog entry below.
-Documentation-only commits do not change this candidate's application bytes.
+离线模拟检查不是开发板或视觉验收。构建及录像解码均通过 `tools/build.sh`
+在 Docker 内完成，未修改 SDK 或冻结显示/触控代码。
 
-## Board Gates (All Pending)
+## 板端短验收：2026-10-04
 
-After offline work is complete, start vision, media, UI in that order. Stop in
-reverse order, finishing the recorder before releasing codecs/camera.
+设备：小核 `root@192.168.123.74`，大核 COM5。使用现有
+27 MHz / 4 lane / ST7701 / VTTH=1 固件，不重刷卡、不改网络。
 
-- [ ] GC2093 frames and LCD preview; existing touch remains correct.
-- [ ] Chinese labels readable on the physical 3.1-inch panel; four controls and
-  details/return can be tapped without overlap or touch-mapping changes.
-- [ ] AI face boxes/landmarks/count on LCD; AI switch does not stop encoding.
-- [ ] VLC H.264 + G.711A at rtsp://<board-ip>:8554/lawrec.
-- [ ] Audio packets match mono 8 kHz/320 bytes/40 ms; video/audio SDK clocks align,
-  source PTS identifies the first audio sample, and CHN2 feeds VENC while RGB AI runs.
-- [ ] 10-20 second MP4 plays with sound on a computer after normal stop.
-- [ ] Preview + AI + RTSP + record together; stopping one consumer leaves others alive.
-- [ ] Measured AI2D/KPU/post/total latency, AI FPS, bitrate, queues, CPU/RSS/VB.
+- [x] 大核 `ready result=0`，小核媒体/UI 启动及业务控制握手通过。
+- [x] 先 `stop.sh` 后大核 `q`，正常返回 `msh`；IPC/OSD/camera/MAPI 清理均为 0。
+- [x] 预览关闭且未绑定时 RGB 持续出帧；AI 约 30.3 fps，AI2D 约 1.9 ms、KPU 约 8 ms、后处理约 0.8 ms，含等待的循环约 33 ms。
+- [x] 同时开启 AI、RTSP、录像；编码 H.264 1280x720 约 30 fps/4 Mbps，G.711A 单声道 8 kHz、320 字节/包。
+- [x] Docker 真实 RTSP/TCP 客户端收到 30 个 H.264 VCL NAL、27 个 PCMA 包；不是模拟源。
+- [x] 短录像完成 455 视频帧、120000 音频样本；约 8 MB，输出正式 `.mp4`。
+- [x] 下载真实板端 MP4，FFmpeg 独立解码两轨通过：H.264/avc3 15.000 秒、alaw 15.001 秒。
+- [x] 录像中关闭 RTSP 后录像继续；RTSP 再次开启，录像自动结束后 RTSP 仍运行。
+- [ ] LCD 动态预览：**失败**，开启 VI0→VO1 后队列积压到 45 帧，VB 耗尽。
+- [ ] 真实人脸的数量、框和关键点视觉检查：当前视野无脸，尚未确认。
+- [ ] 3.1 寸屏幕中文可读性、四按钮/详情手指点按及触摸映射的人工验收。
+- [ ] VLC 动态画面及麦克风实际声音的主观检查。
+- [ ] 预览、AI、RTSP、录像四功能并发：被预览问题阻塞，不能标为通过。
 
-Compiling or exercising mock switches cannot check any board gate. Do not reflash,
-change networking or change the passing touch/display driver during offline development.
+录像：`/sharefs/lawrec_records/clip-19700101T014954Z-WIQLZe.mp4`。
+本机留存：`out/board-15s-avc3.mp4`。板端未校时，文件名日期不代表测试日期。
+主要证据：`out/board-rtsp-client.log`、`out/board-avc3-short.log`、
+`out/board-clip-decode.log`。这些本地输出不纳入源码 Git。
 
-## Existing Board Report: Not A New-Demo Pass
+## 预览未解决项
 
-The user's old `/app/lawrec/ui/ui` report contains a successful VI0->VO1 bind,
-CHN0 dump error `0xa0158010`, one CHN1 1280x720 YUV frame and Linux
-`CRTC vblank wait timed out`. This is old-program evidence, not a run of vision.
+开启预览后，VO 输入队列达到 45 帧，RGB 取帧报 `0xa0158010`（NOTREADY），
+编码初始化随后因无空闲 VB 块失败。不启动 Linux UI 也复现，因此尚不能将其
+归因于 DRM/LVGL；真实 VO 扫描时间戳约 58.77 Hz，DSI 错误状态为 0，但这不
+证明图层缓冲正常消费或显示。
 
-- `0xa0158010` maps to VICAP NOTREADY (16), not an allocation error or proof
-  that the whole camera is stopped. Bound CHN0's user dump and its VO feed
-  are different delivery paths. One CHN1 frame proves only that frame existed.
-- New capture follows sample_vicap's supported semiplanar YUV format and
-  binds before VICAP init/start. Preview OFF only gates the layer; it does
-  not repeatedly unbind or insert an idle frame over the capture stream.
-- A Linux vblank warning means DRM's wait missed its event. The inspected
-  driver's enable_vblank changes a software flag; its IRQ handler then calls
-  drm_crtc_handle_vblank. This warning alone neither proves a crash nor identifies
-  the failing VI/VO stage. Check actual IRQ progression and visible output at
-  final acceptance; no kernel/VTTH/clock changes or disabled-wait workaround.
-- With new programs, confirm preview ON/OFF does not unbind VI0->VO1, verify
-  visible camera motion, then enable AI independently to verify RGB delivery.
-  UI button/state acknowledgement alone is insufficient. No long tests needed.
+已尝试最后提交图层配置、启用顺序及 VTTH 阈值行对照，未改善；无收益的阈值
+改动已移除，继续保留固定显示参数。下一步定位大核 VO 队列消费/中断释放路径，
+不能通过加软件滤波、扩大 VB 池或只看绑定成功掩盖问题。
 
-The black-screen root cause has not been confirmed on hardware. These changes
-remove known source/configuration differences; they do not certify a repair.
+当前预览 OFF 会解除 VI0→VO1 绑定，避免闲置 VO 消费者占满共用池，RGB AI 和
+编码流保持运行。短演示先保持预览关闭，不用重复长测或录像。
+仅重启小核不支持业务 IPC 自动重连；应先停止小核，再退出并重启大核，最后启动小核。
+一次客户端接收在停止/重启交叠时超时，未声明所有客户端重连场景均通过。

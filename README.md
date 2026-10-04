@@ -7,14 +7,16 @@ Independent implementation of [the development plan](docs/plan.md). The old
 
 Three-channel camera/preview, single MobileRetinaFace AI2D/KPU integration,
 face decoding/OSD, SDK control IPC and a single asynchronous LVGL page now
-cross-compile. **All hardware operation remains unverified.**
+cross-compile. Board startup/shutdown, AI, shared audio/video encoding, real RTSP
+reception and a 15-second MP4 with independent decode now pass with preview OFF.
+**LCD preview still fails; face OSD and subjective picture/audio checks remain pending.**
 `media_service` forwards preview/AI/status to vision and runs a real asynchronous
 live555 H.264/G.711A RTSP consumer and an independent MP4 recorder from the
 same encoder/audio source. Both are wired to the one-page UI. Offline mux/decode
 and loopback RTP tests are not hardware/VLC acceptance. Actual LVGL rendering
 and measured metrics are integrated. The clean application candidate is generated;
 see the final [development log](docs/devlog.md) entry for its path/hash.
-Hardware acceptance remains pending.
+See [actual acceptance results](docs/acceptance.md); this is not a full hardware pass.
 `--mock SOCKET` is exclusively an offline control fixture; never deploy it as media.
 
 ## Ownership
@@ -24,7 +26,8 @@ Hardware acceptance remains pending.
 - `demo_ui` (Linux): touch, one page, bounded asynchronous socket requests.
 
 Candidate channel plan: CHN0 800x480 YUV preview, CHN1 1280x720 planar RGB AI,
-CHN2 1280x720 YUV encoder. Three-channel hardware concurrency is **not verified**.
+CHN2 1280x720 YUV encoder. RGB AI and encoding concurrency is verified with
+preview OFF; enabling the VO consumer currently exhausts shared VB buffers.
 Network configuration, face identity databases, playback and recovery mechanisms
 are excluded. No automatic deployment, SDK mutation or board connection.
 
@@ -62,16 +65,16 @@ Final record directory: `/sharefs/lawrec_records`. See [deployment](docs/deploym
 for the offline application bundle, big-core command, Linux start/stop, democtl
 and one short functional pass. This is not a new firmware or a hardware pass.
 
-Camera follows the SDK sample's pre-start VI-to-VO binding order. Preview ON/OFF
-only enables/disables video layer1; the camera binding and RGB/YUV feeds remain
-alive until shutdown. RGB CHN1 explicitly reserves SDK dump output. Existing
+Preview ON enables layer1 then binds VI0-to-VO1. Preview OFF unbinds before
+disabling the layer, keeping an inactive VO consumer out of shared capture pools.
+RGB/YUV capture stays live; RGB CHN1 explicitly reserves SDK dump output. Existing
 panel/PHY/kernel source and LVGL adapter bytes remain unchanged. This is a
 single candidate, not an automatic fallback pipeline or proven black-screen fix.
 
 VICAP CHN0/CHN2 use YUV semiplanar 420, matching SDK sample_vicap. The VO
 layer retains the SDK sample's YVU planar convention; do not copy that enum
-into the capture channel attributes. Preview ON means a checked layer-enable
-request succeeded, not proof of sensor frames or a visible LCD image.
+into the capture channel attributes. Preview ON means checked layer-enable
+and bind requests succeeded, not proof of sensor frames or a visible LCD image.
 
 ## Model And OSD
 

@@ -4,6 +4,7 @@
 #include "control.h"
 #include "detector.h"
 #include "osd.h"
+#include "mapi_wait.h"
 #include <cstdio>
 #include <cstring>
 #include <csignal>
@@ -41,19 +42,35 @@ int main(int argc, char **argv) {
     if (!ret) ret = detector ? detector->load(argv[1]) : -ENOMEM;
     if (!ret) ret = osd.start();
     demo::Status status;
+    status.flags = camera.preview_enabled() ? uint32_t(demo::Preview) : 0U;
     status.vb_kib = camera.vb_budget_kib() + osd.budget_kib();
     control.publish(status);
     if (!ret) ret = control.start();
+    int tty = -1, stdin_flags = -1;
+    bool own_tty = false;
+    if (!ret) {
+        tty = open("/dev/tty", O_RDONLY | O_NONBLOCK);
+        own_tty = tty >= 0;
+        if (tty < 0) {
+            stdin_flags = fcntl(STDIN_FILENO, F_GETFL);
+            if (stdin_flags >= 0 && fcntl(STDIN_FILENO, F_SETFL, stdin_flags | O_NONBLOCK) == 0) {
+                tty = STDIN_FILENO;
+                std::printf("[vision-console] /dev/tty unavailable; using nonblocking stdin for q\n");
+            } else {
+                ret = errno ? -errno : -EIO;
+                std::printf("[vision-console] nonblocking input unavailable result=%d\n", ret);
+            }
+        }
+    }
     std::printf("[vision] ready result=%d; preview/AI initially OFF; stop Linux media before q\n", ret);
-    int tty = open("/dev/tty", O_RDONLY | O_NONBLOCK);
-    if (!ret && tty < 0) ret = -1;
     bool ai_enabled = false;
     std::vector<demo::Face> faces;
     auto period = std::chrono::steady_clock::now();
     unsigned processed = 0;
     while (!ret && running) {
-        char input;
+        char input = 0;
         if (read(tty, &input, 1) == 1 && (input == 'q' || input == 'Q')) break;
+        if (input == 'v') { camera.log_buffers(); input = 0; }
         demo::Request request;
         if (control.take(request)) {
             int result = 0;
@@ -101,11 +118,13 @@ int main(int argc, char **argv) {
             control.publish(status);
         } else usleep(10000);
     }
-    if (tty >= 0) close(tty);
+    if (own_tty) close(tty);
+    else if (stdin_flags >= 0) fcntl(STDIN_FILENO, F_SETFL, stdin_flags);
     int ipc = control.stop();
     detector.reset();
     int overlay = osd.stop();
     int cleanup = overlay ? -EBUSY : camera.stop();
+    demo::stop_mapi_connects();
     int mapi = (overlay || cleanup) ? -EBUSY : kd_mapi_sys_deinit();
     if (overlay || cleanup) std::printf("[vision] retained resources; skip MAPI deinit\n");
     std::printf("[vision] shutdown IPC=%d OSD=%d camera=%d MAPI=%d\n", ipc, overlay, cleanup, mapi);

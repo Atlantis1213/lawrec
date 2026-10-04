@@ -63,20 +63,21 @@ public:
 private:
     Boolean continuePlaying() override;
     static void received(void *, unsigned, unsigned, timeval, unsigned);
-    uint8_t bytes_[2048]{};
+    uint8_t bytes_[demo::max_access_unit]{};
     MediaSubsession &track_;
     Client &client_;
 };
 struct Client : RTSPClient {
-    explicit Client(UsageEnvironment &env)
-        : RTSPClient(env, "rtsp://127.0.0.1:8554/lawrec", 0, "offline-test", 0, -1) {}
+    explicit Client(UsageEnvironment &env, const char *url = nullptr)
+        : RTSPClient(env, url ? url : "rtsp://127.0.0.1:8554/lawrec", 0, "demo-check", 0, -1), board(url != nullptr) {}
     MediaSession *session = nullptr;
     std::unique_ptr<MediaSubsessionIterator> iterator;
     MediaSubsession *track = nullptr;
     unsigned audio = 0, slices = 0;
+    bool board;
     bool playing = false;
     char done = 0;
-    void check() { if (playing && audio >= 2 && slices >= 4) done = 1; }
+    void check() { if (playing && audio >= (board ? 25U : 2U) && slices >= (board ? 30U : 4U)) done = 1; }
     ~Client() override {
         iterator.reset();
         if (session) {
@@ -122,6 +123,17 @@ Boolean Sink::continuePlaying() {
 }
 void Sink::received(void *self, unsigned size, unsigned truncated, timeval, unsigned) {
     auto &sink = *static_cast<Sink *>(self); assert(!truncated);
+    if (sink.client_.board) {
+        assert(size > 0);
+        if (!std::strcmp(sink.track_.mediumName(), "video")) {
+            auto type = sink.bytes_[0] & 31;
+            if (type == 1 || type == 5) ++sink.client_.slices;
+        } else {
+            assert(size == demo::audio_samples);
+            ++sink.client_.audio;
+        }
+        sink.client_.check(); sink.continuePlaying(); return;
+    }
     if (!std::strcmp(sink.track_.mediumName(), "video")) {
         if ((sink.bytes_[0] & 31) == 5) {
             assert(size == 3 && sink.bytes_[1] == 0x88);
@@ -188,7 +200,24 @@ void source_edges(UsageEnvironment &env) {
     Medium::close(video); Medium::close(audio);
 }
 }
-int main() {
+int main(int argc, char **argv) {
+    if (argc == 2) {
+        assert(!std::strncmp(argv[1], "rtsp://", 7));
+        auto *scheduler = BasicTaskScheduler::createNew();
+        auto *env = BasicUsageEnvironment::createNew(*scheduler);
+        auto *client = new Client(*env, argv[1]);
+        assert(client->sendDescribeCommand(Client::describe));
+        TaskToken deadline = scheduler->scheduleDelayedTask(5000000, timeout, &client->done);
+        scheduler->doEventLoop(&client->done);
+        scheduler->unscheduleDelayedTask(deadline);
+        assert(client->playing && client->audio >= 25 && client->slices >= 30);
+        std::printf("board RTSP TCP: H264 NALs=%u PCMA packets=%u; actual RTP received, no image/audio subjective check\n",
+                    client->slices, client->audio);
+        client->sendTeardownCommand(*client->session, nullptr);
+        Medium::close(client); assert(env->reclaim()); delete scheduler;
+        return 0;
+    }
+    assert(argc == 1);
     // network-none Docker has only loopback; this hint is test-only, not a NIC change.
     ReceivingInterfaceAddr = SendingInterfaceAddr = htonl(INADDR_LOOPBACK);
     auto *scheduler = BasicTaskScheduler::createNew();

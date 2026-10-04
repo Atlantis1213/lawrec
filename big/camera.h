@@ -8,6 +8,7 @@ public:
     int start();
     int set_preview(bool enabled);
     int stop();
+    void log_buffers() const;
     bool preview_enabled() const { return preview_; }
     uint32_t vb_budget_kib() const { return vb_kib_; }
 private:

@@ -39,7 +39,7 @@ void load_sample() {
         current->bytes.insert(current->bytes.end(), {0,0,0,1});
         current->bytes.insert(current->bytes.end(), bytes.begin() + nal.offset, bytes.begin() + nal.offset + nal.size);
     }
-    append(); assert(samples.size() == 15 && samples.front()->key);
+    append(); assert(samples.size() == 30 && samples.front()->key && samples[15]->key);
 }
 }
 namespace demo {

@@ -45,10 +45,14 @@ big|all)
     ;;
 esac
 case "$1" in
-little|all)
+little|probe|all)
     export LVGL_ROOT="${LVGL_ROOT:-$BR/build/lawrec/thirdlib/lvgl}"
     cmake -S little -B "$BUILD_ROOT/little" -DCMAKE_TOOLCHAIN_FILE="$BR/host/share/buildroot/toolchainfile.cmake"
-    cmake --build "$BUILD_ROOT/little" -j "$LAWREC_JOBS"
+    if [ "$1" = probe ]; then
+        cmake --build "$BUILD_ROOT/little" --target mapi_probe -j "$LAWREC_JOBS"
+    else
+        cmake --build "$BUILD_ROOT/little" -j "$LAWREC_JOBS"
+    fi
     ;;
 esac
 if [ "$1" = camera ] || [ "$1" = test ]; then
@@ -74,6 +78,15 @@ if [ "$1" = test ]; then
         -I"$MPP/include/comm" -I"$SDK/src/common/cdk/user/component/ipcmsg/include" \
         tests/control_test.cpp big/control.cpp -o out/tests/control_test
     out/tests/control_test
+    c++ -std=c++17 -Wall -Wextra -Werror -Icommon -I"$MPP/include" \
+        -I"$SDK/src/common/cdk/user/component/ipcmsg/include" \
+        -I"$SDK/src/common/cdk/kernel/ipcm/include" \
+        tests/ipc_transport_test.cpp common/ipc_transport.cpp -o out/tests/ipc_transport_test
+    out/tests/ipc_transport_test
+    c++ -std=c++17 -Wall -Wextra -Werror -pthread -Ibig -I"$MPP/include" \
+        -I"$SDK/src/common/cdk/user/component/ipcmsg/include" \
+        tests/mapi_wait_test.cpp big/mapi_wait.cpp -o out/tests/mapi_wait_test
+    timeout 5 out/tests/mapi_wait_test
     c++ -std=c++17 -Wall -Wextra -Werror -Icommon -Ibig -I"$MPP/include" \
         -I"$MPP/include/comm" -I"$MPP/userapps/api" \
         tests/osd_test.cpp big/osd.cpp common/faces.cpp -o out/tests/osd_test
@@ -100,10 +113,21 @@ if [ "$1" = ui ]; then
     mkdir -p out/ui-preview
     out/tests/ui/ui_test out/ui-preview
 fi
-if [ "$1" = rtsp ]; then
+if [ "$1" = rtsp ] || [ "$1" = board-rtsp ]; then
     cmake -S tests/rtsp -B out/tests/rtsp -DCMAKE_BUILD_TYPE=Debug
     cmake --build out/tests/rtsp -j "$LAWREC_JOBS"
-    timeout 15 out/tests/rtsp/rtsp_test
+    if [ "$1" = board-rtsp ]; then
+        timeout 8 out/tests/rtsp/rtsp_test "$LAWREC_RTSP_URL"
+    else
+        timeout 15 out/tests/rtsp/rtsp_test
+    fi
+fi
+if [ "$1" = clip-check ]; then
+    test -f "${LAWREC_CLIP:?Set downloaded board MP4 path inside this project}"
+    test -x out/tests/native/ffmpeg/ffmpeg
+    out/tests/native/ffmpeg/ffprobe -v error -show_entries stream=codec_name,codec_tag_string,width,height,sample_rate,channels,duration -of compact "$LAWREC_CLIP"
+    out/tests/native/ffmpeg/ffmpeg -v error -xerror -i "$LAWREC_CLIP" -vsync 0 -map 0:v:0 -c:v wrapped_avframe -enc_time_base:v 1:1000 -map 0:a:0 -c:a pcm_s16le -f null -
+    echo 'downloaded board MP4: independent H264/G711A decode passed'
 fi
 if [ "$1" = media ]; then
     bash tools/native-codecs.sh

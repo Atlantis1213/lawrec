@@ -9,13 +9,15 @@ set(LVGL_ROOT "$ENV{LVGL_ROOT}")
 include("${CMAKE_CURRENT_SOURCE_DIR}/../tools/mp4.cmake")
 add_executable(media_service media/main.cpp media/vision_client.cpp
     media/source.cpp media/source_frames.cpp media/live_source.cpp media/rtsp_stream.cpp
-    media/rtsp.cpp media/recorder.cpp media/mp4_sink.cpp media/metrics.cpp ../common/frame.cpp ../common/frame_queue.cpp)
+    media/rtsp.cpp media/recorder.cpp media/mp4_sink.cpp media/metrics.cpp
+    ../common/frame.cpp ../common/frame_queue.cpp ../common/ipc_transport.cpp)
 target_compile_definitions(media_service PRIVATE NO_OPENSSL=1)
 target_compile_options(media_service PRIVATE -Wall -Wextra)
 target_include_directories(media_service PRIVATE ../common
     "${MPP}/include" "${MPP}/include/comm" "${MPP}/userapps/api"
     "${CDK}/mapi/include" "${CDK}/mapi/include/api" "${CDK}/mapi/include/comm"
     "${CDK}/component/ipcmsg/include" "${CDK}/component/datafifo/include")
+target_link_options(media_service PRIVATE "-Wl,--wrap=IPCMSG_TransConnect")
 target_include_directories(media_service PRIVATE "${LIVE}/liveMedia/include"
     "${LIVE}/groupsock/include" "${LIVE}/UsageEnvironment/include" "${LIVE}/BasicUsageEnvironment/include")
 target_link_directories(media_service PRIVATE "${CDK}/mapi/mediaclient/lib"
@@ -25,6 +27,10 @@ target_link_directories(media_service PRIVATE "${LIVE}/liveMedia" "${LIVE}/group
 target_link_libraries(media_service PRIVATE -Wl,--start-group mapi ipcmsg datafifo
     liveMedia groupsock BasicUsageEnvironment UsageEnvironment sdk_mp4 pthread -Wl,--end-group)
 set(PORT "${CMAKE_CURRENT_SOURCE_DIR}/../compat/lvgl_port")
+add_executable(mapi_probe EXCLUDE_FROM_ALL ../tests/mapi_probe.cpp)
+target_include_directories(mapi_probe PRIVATE "${MPP}/include" "${CDK}/component/ipcmsg/include")
+target_link_directories(mapi_probe PRIVATE "${CDK}/component/ipcmsg/host/lib")
+target_link_libraries(mapi_probe PRIVATE ipcmsg pthread)
 file(GLOB_RECURSE LVGL_SOURCES "${LVGL_ROOT}/src/*.c")
 if(NOT LVGL_SOURCES)
     message(FATAL_ERROR "SDK LVGL 8.3.1 sources required, set LVGL_ROOT")

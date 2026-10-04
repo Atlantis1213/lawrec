@@ -27,7 +27,15 @@ int main(int argc, char **argv) {
         for (int i = 0; i < count; ++i)
             assert(fwrite(nals[i].p_payload, 1, nals[i].i_payload, file) == unsigned(nals[i].i_payload));
     };
-    for (int i = 0; i < 15; ++i) { picture.i_pts = i; write(&picture); }
+    for (int group = 0; group < 2; ++group) {
+        if (group) {
+            x264_encoder_close(encoder);
+            params.i_sps_id = group;
+            encoder = x264_encoder_open(&params); assert(encoder);
+        }
+        for (int i = 0; i < 15; ++i) { picture.i_pts = i; write(&picture); }
+        assert(!x264_encoder_delayed_frames(encoder));
+    }
     while (x264_encoder_delayed_frames(encoder)) write(nullptr);
     assert(!fclose(file)); x264_picture_clean(&picture); x264_encoder_close(encoder);
 }

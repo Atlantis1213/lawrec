@@ -56,6 +56,7 @@ k_s32 kd_mpi_vo_set_video_layer_attr(k_vo_layer layer, k_vo_video_layer_attr *at
     return 0;
 }
 k_s32 kd_mpi_vo_enable_video_layer(k_vo_layer) { ++enables; return 0; }
+k_u8 kd_mpi_vo_enable() { return 0; }
 k_s32 kd_mpi_vo_disable_video_layer(k_vo_layer) { ++disables; return 0; }
 k_s32 kd_mpi_vicap_get_sensor_info(k_vicap_sensor_type type, k_vicap_sensor_info *) {
     assert(type == GC2093_MIPI_CSI2_1920X1080_30FPS_10BIT_LINEAR); return 0;
@@ -75,26 +76,26 @@ k_s32 kd_mpi_vicap_set_chn_attr(k_vicap_dev, k_vicap_chn channel, k_vicap_chn_at
     return channel == 2 ? attr_error : 0;
 }
 k_s32 kd_mpi_sys_bind(k_mpp_chn *src, k_mpp_chn *dst) {
-    assert(!initialized && src->mod_id == K_ID_VI && src->chn_id == 0 && dst->chn_id == 1);
+    assert(streaming && src->mod_id == K_ID_VI && src->chn_id == 0 && dst->chn_id == 1);
     bound = true; return 0;
 }
-k_s32 kd_mpi_sys_unbind(k_mpp_chn *, k_mpp_chn *) { assert(!streaming); bound = false; return 0; }
+k_s32 kd_mpi_sys_unbind(k_mpp_chn *, k_mpp_chn *) { bound = false; return 0; }
 k_s32 kd_mpi_vicap_set_database_parse_mode(k_vicap_dev, k_vicap_database_parse_mode) { return 0; }
-k_s32 kd_mpi_vicap_init(k_vicap_dev) { assert(bound); initialized = true; return 0; }
+k_s32 kd_mpi_vicap_init(k_vicap_dev) { assert(!bound); initialized = true; return 0; }
 k_s32 kd_mpi_vicap_start_stream(k_vicap_dev) { ++starts; streaming = !start_error; return start_error; }
 k_s32 kd_mpi_vicap_stop_stream(k_vicap_dev) { ++stops; if (!stop_error) streaming = false; return stop_error; }
 k_s32 kd_mpi_vicap_deinit(k_vicap_dev) { assert(!streaming); initialized = false; return 0; }
 }
 int main() {
     demo::Camera camera;
-    assert(camera.start() == 0 && streaming && vb_live && bound);
+    assert(camera.start() == 0 && streaming && vb_live && !bound);
     assert(closes == 1);
     assert(camera.vb_budget_kib() > 0);
     assert(camera.set_preview(true) == 0 && enables == 1);
     assert(camera.set_preview(true) == 0 && enables == 1);
-    assert(camera.set_preview(false) == 0 && streaming && stops == 0);
+    assert(camera.set_preview(false) == 0 && streaming && !bound && stops == 0);
     stop_error = -9;
-    assert(camera.stop() == -9 && streaming && vb_live && bound);
+    assert(camera.stop() == -9 && streaming && vb_live && !bound);
     stop_error = 0;
     assert(camera.stop() == 0 && !streaming && !vb_live && !bound);
     int stop_count = stops;
@@ -109,7 +110,7 @@ int main() {
     connector_error = -6;
     assert(camera.start() == -6 && !vb_live && !bound);
     connector_error = close_error = 0;
-    assert(camera.start() == 0 && streaming && vb_live && bound);
+    assert(camera.start() == 0 && streaming && vb_live && !bound);
     assert(camera.stop() == 0 && !vb_live && !bound);
-    std::puts("camera MOCK ONLY: independent RGB/YUV configuration, pre-start bind, layer-only switch, cleanup passed");
+    std::puts("camera MOCK ONLY: independent RGB/YUV, preview bind gating, cleanup passed");
 }

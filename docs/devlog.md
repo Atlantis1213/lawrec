@@ -419,3 +419,51 @@ Offline development only. No hardware acceptance has been performed for this rep
   Board logs confirm connector-close fix, VICAP start and model/OSD init, but
   IPC startup still fails. This is not a full hardware acceptance pass.
   User confirmed big-core serial is COM5, not COM12. Debugging paused to publish.
+
+### 2026-10-04: Board IPC, Shutdown And Real MP4 Repairs
+
+- User authorized active debugging through root@192.168.123.74 and COM5.
+  All compilation/fixtures still run inside the read-only SDK Docker. No SDK,
+  frozen adapter, panel/PHY, firmware, networking or system libraries changed.
+- Root causes repaired: SDK TRY_CONNECT incorrectly treats pending peer result
+  1 as an error; preserve the fd only after a driver state check. Missing
+  /dev/tty now falls back to nonblocking stdin, so q works. Scope the cancellable
+  SDK connect wrapper to kd_mapi_msg, preventing shutdown from waiting forever
+  for a Linux peer; driver/protocol ABI and cancellation mocks cover these paths.
+- An inactive permanent VI0->VO1 bind retained capture buffers. Preview starts
+  OFF/unbound; ON enables then binds, OFF unbinds before disabling, leaving
+  RGB/encode capture live. Commit the final configured VO layer state; add serial
+  v to inspect live VO/VB reports, without a large automatic boot dump.
+- Real encoder IDRs change SPS/PPS IDs while dimensions stay fixed. The former
+  byte-equality rejection stopped recording with -EPROTO and left .mp4.part.
+  Extend only the private libmov build copy with avc3 tagging and keep in-band
+  parameter sets. A generated alternating-ID x264 fixture and independent
+  FFmpeg decode verify this is decodable, not just accepted by our muxer.
+- Commands/results: tools/build.sh all, test, camera, verify, media, rtsp, ui and
+  bundle-check passed during this task. Final baseline-restored all/test/verify
+  passed; logs out/build-final.log, test-final.log, verify-final.log. The short
+  fixture checks are not substitutes for the actual board results below.
+- Board with preview OFF: ready=0 and Linux start/control succeed; AI ~30.3fps,
+  AI2D ~1.9ms/KPU ~8ms/post ~0.8ms. H264 1280x720 ~30fps/~4Mbps and mono G711A
+  8kHz/320-byte packets run concurrently with AI. Actual live555 TCP reception
+  passed: 30 H264 VCL NALs, 27 PCMA packets (out/board-rtsp-client.log).
+- Real 15s recording completed 455 frames/120000 audio samples while RTSP was
+  stopped then restarted. Record auto-finalized while RTSP remained running.
+  File /sharefs/lawrec_records/clip-19700101T014954Z-WIQLZe.mp4, ~8MB; downloaded
+  out/board-15s-avc3.mp4. LAWREC_CLIP=out/board-15s-avc3.mp4 tools/build.sh
+  clip-check independently decoded H264/avc3 15.000s and alaw 15.001s. Evidence:
+  out/board-avc3-short.log and out/board-clip-decode.log. Board clock is unset.
+- Remaining failure: preview ON accumulates 45 queued VO frames, exhausts shared
+  VB blocks, times out RGB dump (0xa0158010), then fails VENC allocation. Also
+  reproduced without Linux UI. DSI errors=0 and VO scan timestamp ~58.77Hz do
+  not prove queue consumption. Layer ordering and VTTH line430 experiments did
+  not help; line430 and startup report removed, original VTTH threshold restored.
+  No alpha-field workaround: this SDK video-layer struct has no alpha member.
+  Next investigation is the big-core VO consumption/interrupt-release path;
+  kernel root cause and visible preview repair are not confirmed.
+- Latest Linux stop.sh then serial q completed; shutdown IPC/OSD/camera/MAPI=0
+  and msh returned. Business IPC deliberately has no reconnect/replay: restart
+  both cores, not only media. One client attempt overlapped a restart and timed
+  out; no claim that every reconnection scenario or subjective playback passed.
+  Face view was empty: visible boxes/landmarks, physical Chinese touch/readability
+  and VLC picture/microphone checks still pending. No long/stress acceptance.

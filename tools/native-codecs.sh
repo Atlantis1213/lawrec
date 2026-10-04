@@ -6,7 +6,7 @@ NATIVE="$ROOT/out/tests/native"
 SDK_MEDIA="$K230_SDK_ROOT/src/big/mpp/middleware/src"
 mkdir -p "$NATIVE"
 # These SDK tools are test-only. Never clean/configure the read-only originals.
-if [ ! -x "$NATIVE/generate-h264" ]; then
+if [ ! -f "$NATIVE/x264/libx264.a" ]; then
     mkdir -p "$NATIVE/x264"
     cp -a "$SDK_MEDIA/x264/src/." "$NATIVE/x264/"
     (
@@ -16,6 +16,8 @@ if [ ! -x "$NATIVE/generate-h264" ]; then
         make clean
         make -j "$LAWREC_JOBS" lib-static
     )
+fi
+if [ ! -x "$NATIVE/generate-h264" ] || [ tests/media/generate_h264.cpp -nt "$NATIVE/generate-h264" ]; then
     c++ -std=c++17 -Wall -Wextra -Werror -I"$NATIVE/x264" \
         tests/media/generate_h264.cpp "$NATIVE/x264/libx264.a" -pthread -lm -o "$NATIVE/generate-h264"
 fi

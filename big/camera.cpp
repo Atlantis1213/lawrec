@@ -76,6 +76,8 @@ int Camera::setup_display() {
     layer.func = K_ROTATION_90;
     ret = checked("preview layer attr", kd_mpi_vo_set_video_layer_attr(K_VO_LAYER1, &layer));
     if (!ret) ret = checked("preview initial off", kd_mpi_vo_disable_video_layer(K_VO_LAYER1));
+    // Connector enabled VO before layer setup; commit the final layer config.
+    if (!ret) ret = checked("VO layer config commit", kd_mpi_vo_enable());
     return ret;
 }
 
@@ -115,12 +117,8 @@ int Camera::setup_capture() {
         ret = checked("VICAP channel attr", kd_mpi_vicap_set_chn_attr(VICAP_DEV_ID_0, channel, attr));
         if (ret) return ret;
     }
-    // Bind before init/start, as in the SDK sample; keep this bind for capture's
-    // lifetime. Preview OFF only gates its layer, never stops AI/encoder frames.
-    auto src = source(), dst = destination();
-    ret = checked("VI0 -> VO1 bind", kd_mpi_sys_bind(&src, &dst));
-    if (ret) return ret;
-    bound_ = true;
+    // An inactive VO consumer must not retain capture frames in its queue.
+    // Bind only while preview is requested; RGB/encode capture stays live.
     ret = checked("VICAP database", kd_mpi_vicap_set_database_parse_mode(VICAP_DEV_ID_0, VICAP_DATABASE_PARSE_XML_JSON));
     if (!ret) ret = checked("VICAP init", kd_mpi_vicap_init(VICAP_DEV_ID_0));
     if (ret) return ret;
@@ -138,11 +136,38 @@ int Camera::start() {
     if (ret) stop();
     return ret;
 }
+void Camera::log_buffers() const {
+    const char *paths[] = {"/proc/umap/vo", "/proc/umap/vb"};
+    for (const char *path : paths) {
+        FILE *report = std::fopen(path, "r");
+        if (!report) {
+            std::printf("[vision-vb] %s unavailable errno=%d\n", path, errno);
+            continue;
+        }
+        // RT-Smart proc callbacks may print directly instead of filling read().
+        std::printf("[vision-vb] live report %s (serial v refreshes)\n", path);
+        char line[512];
+        while (std::fgets(line, sizeof(line), report)) std::fputs(line, stdout);
+        std::fclose(report);
+    }
+}
 int Camera::set_preview(bool enabled) {
     if (!streaming_) return -EAGAIN;
-    if (enabled == preview_) return 0;
-    int ret = checked(enabled ? "preview ON" : "preview OFF", enabled ?
-        kd_mpi_vo_enable_video_layer(K_VO_LAYER1) : kd_mpi_vo_disable_video_layer(K_VO_LAYER1));
+    if (enabled == preview_ && bound_ == enabled) return 0;
+    auto src = source(), dst = destination();
+    int ret = 0;
+    if (enabled) {
+        ret = checked("preview layer ON", kd_mpi_vo_enable_video_layer(K_VO_LAYER1));
+        if (!ret) ret = checked("VI0 -> VO1 bind", kd_mpi_sys_bind(&src, &dst));
+        if (!ret) bound_ = true;
+        else kd_mpi_vo_disable_video_layer(K_VO_LAYER1);
+    } else {
+        if (bound_) {
+            ret = checked("VI0 -> VO1 unbind", kd_mpi_sys_unbind(&src, &dst));
+            if (!ret) bound_ = false;
+        }
+        if (!ret) ret = checked("preview layer OFF", kd_mpi_vo_disable_video_layer(K_VO_LAYER1));
+    }
     if (!ret) preview_ = enabled;
     return ret;
 }

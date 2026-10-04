@@ -6,6 +6,7 @@
 #include <limits>
 #include <unistd.h>
 extern "C" int demo_mov_writer_end_track(mov_writer_t *, int, int64_t);
+extern "C" int demo_mov_writer_inband_avc(mov_writer_t *, int);
 
 namespace demo {
 int Mp4Sink::remember(int error) {
@@ -70,6 +71,8 @@ int Mp4Sink::open(int fd, const Frame &first) {
     if (error_) return error_;
     video_track_ = mov_writer_add_video(writer_, MOV_OBJECT_H264, video_width, video_height, extra.data(), size);
     if (video_track_ < 0) return remember(video_track_);
+    ret = demo_mov_writer_inband_avc(writer_, video_track_);
+    if (ret) return remember(ret);
     audio_track_ = mov_writer_add_audio(writer_, MOV_OBJECT_G711a, 1, 16, audio_rate, "", 0);
     return audio_track_ < 0 ? remember(audio_track_) : error_;
 }
@@ -82,10 +85,14 @@ int Mp4Sink::video(const Frame &frame) {
     sample_.clear(); bool vcl = false;
     for (auto nal : nals) {
         if (nal.type == 7 || nal.type == 8) {
-            const auto &header = nal.type == 7 ? sps_ : pps_;
-            if (nal.size != header.size() || !std::equal(header.begin(), header.end(), frame.bytes.begin() + nal.offset))
-                return remember(-EPROTO); // Fixed codec config; no mid-file reconfiguration.
-            continue;
+            auto &header = nal.type == 7 ? sps_ : pps_;
+            if (nal.size != header.size() || !std::equal(header.begin(), header.end(), frame.bytes.begin() + nal.offset)) {
+                std::fprintf(stderr, "[mp4] parameter set changed type=%u old=%zu new=%zu pts=%llu\n",
+                    nal.type, header.size(), nal.size, (unsigned long long)frame.pts_us);
+                header.assign(frame.bytes.begin() + nal.offset, frame.bytes.begin() + nal.offset + nal.size);
+            }
+            // avc3 carries each parameter set with the slices that reference it.
+            // Encoder dimensions stay fixed by MediaSource, not by SPS byte identity.
         }
         if (nal.type >= 1 && nal.type <= 5) vcl = true;
         for (int shift : {24, 16, 8, 0}) sample_.push_back(uint8_t(nal.size >> shift));

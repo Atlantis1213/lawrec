@@ -8,7 +8,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(NN "${SDK}/src/big/nncase")
 set(MPP "${SDK}/src/big/mpp")
 set(CDK "${SDK}/src/common/cdk/user")
-add_executable(vision.elf main.cpp camera.cpp detector.cpp osd.cpp control.cpp ../common/faces.cpp)
+add_executable(vision.elf main.cpp camera.cpp detector.cpp osd.cpp control.cpp mapi_wait.cpp
+    ../common/faces.cpp ../common/ipc_transport.cpp)
 target_compile_options(vision.elf PRIVATE -Wall -Wextra -O2 -march=rv64imafdcv -mabi=lp64d -mcmodel=medany)
 target_include_directories(vision.elf PRIVATE ../common
     "${MPP}/include" "${MPP}/include/comm" "${MPP}/userapps/api"
@@ -22,6 +23,8 @@ target_link_directories(vision.elf PRIVATE "${MPP}/userapps/lib"
     "${SDK}/src/big/rt-smart/userapps/sdk/rt-thread/lib/risc-v/rv64"
     "${NN}/riscv64/nncase/lib" "${NN}/riscv64/rvvlib")
 target_link_options(vision.elf PRIVATE -static "-T${CMAKE_CURRENT_SOURCE_DIR}/link.lds"
+    "-Wl,--wrap=IPCMSG_TransConnect"
+    "-Wl,--wrap=kd_ipcmsg_connect"
     "-Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/vision.map"
     -march=rv64imafdcv -mabi=lp64d -mcmodel=medany -fopenmp)
 target_link_libraries(vision.elf PRIVATE -Wl,--start-group sys vicap vb vo sensor connector
