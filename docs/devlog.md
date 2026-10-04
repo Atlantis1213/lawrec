@@ -363,3 +363,12 @@ Offline development only. No hardware acceptance has been performed for this rep
   short rendering/glyph/interaction checks were run; media stress was not repeated.
 - This documentation-only follow-up does not change the candidate's application
   bytes. Physical readability/touch and all prior hardware gates remain pending.
+
+### 2026-10-04: Chinese Startup And Short Acceptance Guide
+
+- Translated docs/deployment.md into Chinese, including startup/shutdown order,
+  package prerequisites, safety notes and one short functional acceptance pass.
+  Acceptance steps now use the four actual Chinese UI button names.
+- Validation: git diff --check passed; fenced shell commands match HEAD exactly.
+  Documentation only: no build, board access or application archive update.
+  Hardware acceptance remains pending.
