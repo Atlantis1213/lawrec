@@ -406,3 +406,16 @@ Offline development only. No hardware acceptance has been performed for this rep
   No process launched or stopped; original vision.elf/archive remain intact.
   Deployment guide documents the temporary path. User must retry big startup,
   then Linux start.sh only after ready result=0; hardware acceptance pending.
+
+### 2026-10-04: Demo Branch Publishing And Pending IPC Startup
+
+- User selected the existing Atlantis1213/lawrec repository's demo branch.
+  Configured origin to https://github.com/Atlantis1213/lawrec.git; ls-remote
+  found no existing demo branch. Publish local main to remote demo without
+  modifying the original main branch or force-pushing. SDK/models/out artifacts
+  remain untracked and excluded from this source transfer.
+- Before the publishing request, Docker tools/build.sh test and ui passed;
+  results are in out/test-startup-fix.log and out/test-ui-startup-fix.log.
+  Board logs confirm connector-close fix, VICAP start and model/OSD init, but
+  IPC startup still fails. This is not a full hardware acceptance pass.
+  User confirmed big-core serial is COM5, not COM12. Debugging paused to publish.
