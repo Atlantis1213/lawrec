@@ -2,6 +2,7 @@
 #include "config.h"
 #include <cerrno>
 #include <cstdio>
+#include <unistd.h>
 #include "mpi_connector_api.h"
 #include "mpi_sys_api.h"
 #include "mpi_vb_api.h"
@@ -61,10 +62,12 @@ int Camera::setup_display() {
     if (fd < 0) return checked("connector open", fd);
     ret = checked("connector power", kd_mpi_connector_power_set(fd, K_TRUE));
     if (!ret) ret = checked("connector init", kd_mpi_connector_init(fd, info));
-    int close_ret = checked("connector close", kd_mpi_connector_close(fd));
+    display_ = !ret;
+    // SDK kd_mpi_connector_close() calls close() but omits its return value.
+    int close_ret = ::close(fd);
+    close_ret = checked("connector close", close_ret ? -errno : 0);
     if (!ret) ret = close_ret;
     if (ret) return ret;
-    display_ = true;
     k_vo_video_layer_attr layer{};
     layer.img_size.width = preview_height;
     layer.img_size.height = preview_width;

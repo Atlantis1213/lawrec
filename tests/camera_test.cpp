@@ -8,11 +8,14 @@
 #include "mpi_vo_api.h"
 #include <cassert>
 #include <cstdio>
+#include <cerrno>
+#include <unistd.h>
 
 namespace {
 bool vb_live, bound, initialized, streaming;
 int starts, stops, enables, disables;
 int start_error, stop_error, attr_error;
+int connector_error, close_error, closes;
 k_vb_config pools;
 bool dump_reserved[3];
 }
@@ -30,13 +33,22 @@ k_s32 kd_mpi_vb_exit() { assert(!streaming && !initialized && !bound); vb_live =
 k_s32 kd_mpi_get_connector_info(k_connector_type, k_connector_info *) { return 0; }
 k_s32 kd_mpi_connector_open(const char *) { return 3; }
 k_s32 kd_mpi_connector_power_set(k_s32, k_bool) { return 0; }
-k_s32 kd_mpi_connector_close(k_s32) { return 0; }
+k_s32 kd_mpi_connector_close(k_s32) {
+    assert(false && "SDK connector close has an undefined return value; use close");
+    return -4096;
+}
+int close(int fd) noexcept {
+    assert(fd == 3);
+    ++closes;
+    errno = close_error;
+    return close_error ? -1 : 0;
+}
 k_s32 kd_mpi_connector_init(k_s32, k_connector_info info) {
     assert(info.pixclk_div == 21 && info.phy_attr.m == 52 && info.phy_attr.n == 3);
     assert(info.phy_attr.voc == 0x1f && info.phy_attr.hs_freq == 0xb5);
     assert(info.resolution.pclk == 27000 && info.resolution.phyclk == 324000);
     assert(!info.dsi_test_mode && !info.screen_test_mode);
-    return 0;
+    return connector_error;
 }
 k_s32 kd_mpi_vo_set_video_layer_attr(k_vo_layer layer, k_vo_video_layer_attr *attr) {
     assert(layer == K_VO_LAYER1 && attr->img_size.width == 480 && attr->img_size.height == 800);
@@ -76,6 +88,7 @@ k_s32 kd_mpi_vicap_deinit(k_vicap_dev) { assert(!streaming); initialized = false
 int main() {
     demo::Camera camera;
     assert(camera.start() == 0 && streaming && vb_live && bound);
+    assert(closes == 1);
     assert(camera.vb_budget_kib() > 0);
     assert(camera.set_preview(true) == 0 && enables == 1);
     assert(camera.set_preview(true) == 0 && enables == 1);
@@ -91,5 +104,12 @@ int main() {
     start_error = 0; attr_error = -7;
     assert(camera.start() == -7 && !vb_live && !bound);
     assert(camera.stop() == 0);
+    attr_error = 0; close_error = EIO;
+    assert(camera.start() == -EIO && !vb_live && !bound);
+    connector_error = -6;
+    assert(camera.start() == -6 && !vb_live && !bound);
+    connector_error = close_error = 0;
+    assert(camera.start() == 0 && streaming && vb_live && bound);
+    assert(camera.stop() == 0 && !vb_live && !bound);
     std::puts("camera MOCK ONLY: independent RGB/YUV configuration, pre-start bind, layer-only switch, cleanup passed");
 }

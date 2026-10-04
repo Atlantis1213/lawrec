@@ -51,6 +51,14 @@ little|all)
     cmake --build "$BUILD_ROOT/little" -j "$LAWREC_JOBS"
     ;;
 esac
+if [ "$1" = camera ] || [ "$1" = test ]; then
+    mkdir -p out/tests
+    MPP="$SDK/src/big/mpp"
+    c++ -std=c++17 -Wall -Wextra -Werror -Icommon -Ibig -I"$MPP/include" \
+        -I"$MPP/include/comm" -I"$MPP/userapps/api" \
+        tests/camera_test.cpp big/camera.cpp -o out/tests/camera_test
+    out/tests/camera_test
+fi
 if [ "$1" = test ]; then
     mkdir -p out/tests
     c++ -std=c++17 -Wall -Wextra -Werror -Icommon tests/protocol_test.cpp -o out/tests/protocol_test
@@ -59,10 +67,6 @@ if [ "$1" = test ]; then
     out/tests/protocol_test
     out/tests/socket_test out/tests/mock_service
     MPP="$SDK/src/big/mpp"
-    c++ -std=c++17 -Wall -Wextra -Werror -Icommon -Ibig -I"$MPP/include" \
-        -I"$MPP/include/comm" -I"$MPP/userapps/api" \
-        tests/camera_test.cpp big/camera.cpp -o out/tests/camera_test
-    out/tests/camera_test
     c++ -std=c++17 -Wall -Wextra -Werror -Icommon tests/faces_test.cpp common/faces.cpp \
         "$SDK/src/big/nncase/examples/image_face_detect/anchors_320.cc" -o out/tests/faces_test
     out/tests/faces_test

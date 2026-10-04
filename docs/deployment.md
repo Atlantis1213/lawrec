@@ -101,6 +101,20 @@ sh run.sh democtl rtsp off
 
 ## 指标与排错说明
 
+若旧包打印 `connector init result=0`，随后打印 `connector close result=-4096`
+并以 `ready result=-4096` 退出，这是应用误读 SDK 关闭接口返回值的问题，
+不是触控或显示时序失败。SDK 的 `kd_mpi_connector_close()` 实现缺少返回值；
+修正版使用 `close(fd)` 并检查真实错误。只有 `ready result=0` 才可启动小核。
+
+已上传的临时修正版可在旧 vision 确认退出后从大核串口执行：
+
+```sh
+/sharefs/lawrec-demo/bin/vision-connector-fix.elf /sharefs/lawrec-demo/models/retinaface.kmodel
+```
+
+该文件单独上传并校验，旧应用包和原 `vision.elf` 未覆盖。
+后续从修复提交重新打包时，修复会包含在标准路径 `bin/vision.elf` 中。
+
 界面帧率是实际回调速率，不保证等于屏幕刷新率或客户端播放帧率。
 CPU/RSS 仅统计 `media_service`；`democtl` 中的 `UINT32_MAX` 表示数据不可用。
 VB 数值是配置的缓冲池预算，不是系统实际总占用。

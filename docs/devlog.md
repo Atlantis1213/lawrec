@@ -386,3 +386,23 @@ Offline development only. No hardware acceptance has been performed for this rep
   firmware or network changed. The archive and its bundled documentation are
   unchanged; source-only Chinese documentation updates are not in this archive.
   Hardware functional acceptance remains pending.
+
+### 2026-10-04: Fix Connector Close Aborting Vision Startup
+
+- Board report: connector power/init succeeded, close reported -4096, vision
+  exited before capture setup and Linux start.sh failed. SDK mpi_connector.c
+  declares kd_mpi_connector_close as k_s32 but only calls close(fd), without a
+  return statement. Treating that undefined return as a status aborted startup.
+- Application now calls POSIX close(fd) directly, translates its errno, keeps
+  an earlier init error and marks successful display initialization before
+  close so cleanup still tracks it. No SDK, panel, timing or touch changes.
+- Added tools/build.sh camera for only the ownership/cleanup mock. Checks
+  bypassing the defective wrapper, real close failure, retaining init failure,
+  and startup after cleanup. Docker camera, big and verify passed; git diff
+  --check passed. Mock/ELF checks do not prove board startup or frame delivery.
+- Uploaded out/big/vision.elf as /sharefs/lawrec-demo/bin/vision-connector-fix.elf
+  via scp -O to root@192.168.123.74, continuing the user-requested transfer.
+  Remote SHA256 verified: 8f3f4c4724f4a007a744c329d7ec50e42d93d8126f42f9efa0f14da878b9ebe1.
+  No process launched or stopped; original vision.elf/archive remain intact.
+  Deployment guide documents the temporary path. User must retry big startup,
+  then Linux start.sh only after ready result=0; hardware acceptance pending.

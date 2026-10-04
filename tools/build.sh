@@ -4,7 +4,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 SDK=$(cd "${K230_SDK_ROOT:-$ROOT/../k230_sdk}" && pwd -P)
 IMAGE=${K230_DOCKER_IMAGE:-ghcr.io/kendryte/k230_sdk}
 TARGET=${1:-all}
-case "$TARGET" in all|big|little|test|rtsp|media|ui|fonts|elf|verify|package|bundle-check) ;; *) echo 'Usage: tools/build.sh {all|big|little|test|rtsp|media|ui|fonts|elf|verify|package|bundle-check}' >&2; exit 2;; esac
+case "$TARGET" in all|big|little|test|camera|rtsp|media|ui|fonts|elf|verify|package|bundle-check) ;; *) echo 'Usage: tools/build.sh {all|big|little|test|camera|rtsp|media|ui|fonts|elf|verify|package|bundle-check}' >&2; exit 2;; esac
 FONT_MOUNTS=()
 if [ "$TARGET" = fonts ]; then
     test -d "${LV_FONT_CONVERTER_ROOT:?Set an existing node_modules directory containing lv_font_conv 1.5.3}"
