@@ -8,8 +8,9 @@ Independent implementation of [the development plan](docs/plan.md). The old
 Three-channel camera/preview, single MobileRetinaFace AI2D/KPU integration,
 face decoding/OSD, SDK control IPC and a single asynchronous LVGL page now
 cross-compile. Board startup/shutdown, AI, shared audio/video encoding, real RTSP
-reception and a 15-second MP4 with independent decode now pass with preview OFF.
-**LCD preview still fails; face OSD and subjective picture/audio checks remain pending.**
+reception and a 15-second MP4 with independent decode now pass with preview ON.
+VO queue starvation is fixed; **physical LCD motion, face OSD and subjective
+picture/audio checks remain pending.**
 `media_service` forwards preview/AI/status to vision and runs a real asynchronous
 live555 H.264/G.711A RTSP consumer and an independent MP4 recorder from the
 same encoder/audio source. Both are wired to the one-page UI. Offline mux/decode
@@ -26,8 +27,8 @@ See [actual acceptance results](docs/acceptance.md); this is not a full hardware
 - `demo_ui` (Linux): touch, one page, bounded asynchronous socket requests.
 
 Candidate channel plan: CHN0 800x480 YUV preview, CHN1 1280x720 planar RGB AI,
-CHN2 1280x720 YUV encoder. RGB AI and encoding concurrency is verified with
-preview OFF; enabling the VO consumer currently exhausts shared VB buffers.
+CHN2 1280x720 YUV encoder. Preview queue consumption, RGB AI and encoding
+concurrency are verified; VO no longer exhausts shared VB buffers.
 Network configuration, face identity databases, playback and recovery mechanisms
 are excluded. No automatic deployment, SDK mutation or board connection.
 
@@ -70,6 +71,11 @@ disabling the layer, keeping an inactive VO consumer out of shared capture pools
 RGB/YUV capture stays live; RGB CHN1 explicitly reserves SDK dump output. Existing
 panel/PHY/kernel source and LVGL adapter bytes remain unchanged. This is a
 single candidate, not an automatic fallback pipeline or proven black-screen fix.
+
+The frozen connector only enables VTTH. `VoSync` supplies the missing frame-end
+interrupt (VO offset 0x3e0 bit20) after layer setup, restoring the original bit
+before VB release at shutdown. No timing/PHY/VTTH/panel changes. This application
+register adapter is specific to the frozen SDK, not portable to other hardware.
 
 VICAP CHN0/CHN2 use YUV semiplanar 420, matching SDK sample_vicap. The VO
 layer retains the SDK sample's YVU planar convention; do not copy that enum

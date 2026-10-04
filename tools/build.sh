@@ -4,7 +4,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 SDK=$(cd "${K230_SDK_ROOT:-$ROOT/../k230_sdk}" && pwd -P)
 IMAGE=${K230_DOCKER_IMAGE:-ghcr.io/kendryte/k230_sdk}
 TARGET=${1:-all}
-case "$TARGET" in all|big|little|probe|test|camera|rtsp|board-rtsp|clip-check|media|ui|fonts|elf|verify|package|bundle-check) ;; *) echo 'Usage: tools/build.sh {all|big|little|probe|test|camera|rtsp|board-rtsp|clip-check|media|ui|fonts|elf|verify|package|bundle-check}' >&2; exit 2;; esac
+case "$TARGET" in all|big|little|probe|preview-probe|test|camera|rtsp|board-rtsp|clip-check|media|ui|fonts|elf|verify|package|bundle-check) ;; *) echo 'Usage: tools/build.sh {all|big|little|probe|preview-probe|test|camera|rtsp|board-rtsp|clip-check|media|ui|fonts|elf|verify|package|bundle-check}' >&2; exit 2;; esac
 NETWORK=none
 if [ "$TARGET" = board-rtsp ]; then
     test -n "${LAWREC_RTSP_URL:?Explicit board RTSP URL required}"

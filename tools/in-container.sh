@@ -39,9 +39,13 @@ if [ "$1" = verify ]; then
     echo 'ELF structural/static SDK loader-range/frozen-byte checks passed; hardware execution remains pending'
 fi
 case "$1" in
-big|all)
+big|preview-probe|all)
     cmake -S big -B "$BUILD_ROOT/big"
-    cmake --build "$BUILD_ROOT/big" -j "$LAWREC_JOBS"
+    if [ "$1" = preview-probe ]; then
+        cmake --build "$BUILD_ROOT/big" --target preview_probe.elf -j "$LAWREC_JOBS"
+    else
+        cmake --build "$BUILD_ROOT/big" -j "$LAWREC_JOBS"
+    fi
     ;;
 esac
 case "$1" in
@@ -62,6 +66,8 @@ if [ "$1" = camera ] || [ "$1" = test ]; then
         -I"$MPP/include/comm" -I"$MPP/userapps/api" \
         tests/camera_test.cpp big/camera.cpp -o out/tests/camera_test
     out/tests/camera_test
+    c++ -std=c++17 -Wall -Wextra -Werror -Ibig tests/vo_sync_test.cpp big/vo_sync.cpp -o out/tests/vo_sync_test
+    out/tests/vo_sync_test
 fi
 if [ "$1" = test ]; then
     mkdir -p out/tests

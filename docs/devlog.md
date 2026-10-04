@@ -489,3 +489,51 @@ Offline development only. No hardware acceptance has been performed for this rep
   demonstrated once if desired; already-decoded 15s board evidence was not
   repeated. Preview and face OSD visual checks remain unresolved/pending as in
   acceptance.md. Source committed locally; no automatic remote push.
+
+### 2026-10-04: Preview VO Queue Starvation Fixed With Frame-End IRQ
+
+- Continued authorized COM5/SSH debugging while preserving the exact frozen
+  SDK, 27MHz/div21, PHY, 4 lanes, ST7701 commands and VTTH=1. First stopped
+  registered Linux services, then q and confirmed msh before replacing ELFs.
+- Read-only investigation: MMZ mmap rejects registers, and ordinary /dev/mem
+  mappings return invalid all-ones PLIC values on both user-space cores. Kernel
+  devmem2 instead showed IRQ133 priority=1, enable word=0x1030 (bit5 on),
+  S-mode threshold=0. Thus the earlier all-ones data was not an interrupt result.
+  No claim about a precise silicon VTTH signal-routing defect is established.
+- Added an explicitly built, EXCLUDE_FROM_ALL preview_probe.elf: sole camera
+  owner, no stdin reader, automatic 12s stop. Run in background only after both
+  demo cores exit, enabling native msh register reads while capture is live.
+  Original snapshot: VO queue=33 and progressing toward pool exhaustion.
+  Single-variable change via kernel devmem2: 0x908403e0 bit20 OFF -> ON,
+  equivalent to private SDK kd_vo_set_frame_intr(1), leaving VTTH/timing intact.
+  Queue drained to 0; all 30 common stream blocks became free. Restored OFF;
+  probe automatic cleanup=0. Log out/board-preview-frame-irq.log.
+- Confirmed missing initialization boundary: frozen connector sets VTTH but
+  leaves frame-end IRQ disabled; enabling frame-end processing restores VO
+  consumption. No public MPI frame-end setter exists in this SDK. Added small
+  VoSync application adapter: uncached VO page, only bit20 read/modify/write,
+  explicit I/O fences and readback, retain original bit, restore after stopping
+  capture/layers before VB exit. Preserve other bits/VTTH. The raw register
+  adapter is specifically coupled to this frozen SDK, not a portable driver.
+  Startup prints frame-end=0x00100000, VTTH=0x0010000a. Serial v also reads VO
+  IRQ registers alongside buffer reports; failed PLIC reads are not retained.
+- Focused Docker big, camera+VO bit/restore/map-error fixtures and verify passed;
+  out/build-preview-sync.log, test-preview-sync.log, verify-preview-sync.log.
+  Actual four-function run: preview queue 0..1, AI ~30.3fps, encode ~30.3fps
+  ~4Mbps; Linux VO IRQ count now increases and programmed layer1 Y addresses
+  change from 0x10000000 to 0x1008d000. Preview OFF/ON did not stop AI/encoding.
+- LAWREC_RTSP_URL=rtsp://192.168.123.74:8554/lawrec tools/build.sh board-rtsp
+  passed with preview/AI/record active: 30 H264 VCL NALs, 26 PCMA packets.
+  15s automatic recording completed 455 frames/120000 samples:
+  /sharefs/lawrec_records/clip-19700101T061635Z-9IjNKg.mp4. Downloaded
+  out/board-preview-sync.mp4; tools/build.sh clip-check independently decoded
+  H264/avc3 15.000s and alaw 15.001s. Logs out/board-preview-sync-controls.log,
+  buffers.log, rtsp.log, record.log, decode.log (each with board-preview-sync- prefix).
+- Normal stop.sh -> q succeeded: IPC/OSD/camera/MAPI=0, frame-end restore=0,
+  VB exit=0; subsequent kernel devmem2 confirmed frame-end register restored to
+  0 (out/board-preview-sync-stop.log). No force kills, reflash or long stress run.
+- Remaining: user must visually confirm LCD motion and face boxes/landmarks,
+  physical Chinese touch/readability, and playback picture/microphone sound.
+  Queue/metrics/RTP/decode proofs do not certify a visible screen or every
+  vblank wait. Deployment/acceptance docs now permit joint preview instead of
+  instructing users to keep it OFF. Business IPC still needs paired restarts.

@@ -2,6 +2,8 @@
 #include "config.h"
 #include <cerrno>
 #include <cstdio>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include "mpi_connector_api.h"
 #include "mpi_sys_api.h"
@@ -18,6 +20,20 @@ int checked(const char *operation, int ret) {
 constexpr unsigned align(unsigned bytes) { return (bytes + 4095) & ~4095U; }
 k_mpp_chn source() { return {K_ID_VI, VICAP_DEV_ID_0, VICAP_CHN_ID_0}; }
 k_mpp_chn destination() { return {K_ID_VO, K_VO_DISPLAY_DEV_ID, K_VO_DISPLAY_CHN_ID1}; }
+void read_registers(const char *name, uint64_t base, const unsigned *offsets, unsigned count) {
+    int fd = open("/dev/mem", O_RDONLY | O_SYNC);
+    if (fd < 0) { std::printf("[vision-vo] %s mem open failed errno=%d\n", name, errno); return; }
+    void *mapping = mmap(nullptr, 4096, PROT_READ, MAP_SHARED, fd, static_cast<off_t>(base));
+    close(fd);
+    if (mapping == MAP_FAILED || !mapping) {
+        std::printf("[vision-vo] %s map failed errno=%d\n", name, errno);
+        return;
+    }
+    auto *regs = static_cast<volatile uint32_t *>(mapping);
+    for (unsigned i = 0; i < count; ++i)
+        std::printf("[vision-vo] %s +0x%x = 0x%08x\n", name, offsets[i], regs[offsets[i] / 4]);
+    munmap(mapping, 4096);
+}
 }
 
 int Camera::setup_buffers() {
@@ -78,6 +94,7 @@ int Camera::setup_display() {
     if (!ret) ret = checked("preview initial off", kd_mpi_vo_disable_video_layer(K_VO_LAYER1));
     // Connector enabled VO before layer setup; commit the final layer config.
     if (!ret) ret = checked("VO layer config commit", kd_mpi_vo_enable());
+    if (!ret) ret = checked("VO frame-end sync", sync_.enable());
     return ret;
 }
 
@@ -129,7 +146,7 @@ int Camera::setup_capture() {
 }
 
 int Camera::start() {
-    if (buffers_ || capture_ || bound_) return -EALREADY;
+    if (buffers_ || capture_ || bound_ || sync_.active()) return -EALREADY;
     int ret = setup_buffers();
     if (!ret) ret = setup_display();
     if (!ret) ret = setup_capture();
@@ -137,6 +154,8 @@ int Camera::start() {
     return ret;
 }
 void Camera::log_buffers() const {
+    const unsigned vo[] = {0x3e0, 0x3e4, 0x3ec};
+    read_registers("VO irq", 0x90840000ULL, vo, 3);
     const char *paths[] = {"/proc/umap/vo", "/proc/umap/vb"};
     for (const char *path : paths) {
         FILE *report = std::fopen(path, "r");
@@ -188,7 +207,9 @@ int Camera::stop() {
     if (display_ && !check("preview layer off", kd_mpi_vo_disable_video_layer(K_VO_LAYER1))) {
         display_ = false; preview_ = false;
     }
-    if (!bound_ && !capture_ && !display_ && buffers_ && !check("VB exit", kd_mpi_vb_exit())) buffers_ = false;
+    if (!bound_ && !capture_ && !display_) check("VO frame-end restore", sync_.stop());
+    if (!bound_ && !capture_ && !display_ && !sync_.active() && buffers_ &&
+        !check("VB exit", kd_mpi_vb_exit())) buffers_ = false;
     return error;
 }
 }

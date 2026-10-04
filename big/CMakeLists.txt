@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(NN "${SDK}/src/big/nncase")
 set(MPP "${SDK}/src/big/mpp")
 set(CDK "${SDK}/src/common/cdk/user")
-add_executable(vision.elf main.cpp camera.cpp detector.cpp osd.cpp control.cpp mapi_wait.cpp
+add_executable(vision.elf main.cpp camera.cpp vo_sync.cpp detector.cpp osd.cpp control.cpp mapi_wait.cpp
     ../common/faces.cpp ../common/ipc_transport.cpp)
 target_compile_options(vision.elf PRIVATE -Wall -Wextra -O2 -march=rv64imafdcv -mabi=lp64d -mcmodel=medany)
 target_include_directories(vision.elf PRIVATE ../common
@@ -35,3 +35,12 @@ target_link_libraries(vision.elf PRIVATE -Wl,--start-group sys vicap vb vo senso
     rvv Nncase.Runtime.Native nncase.rt_modules.k230 functional_k230
     -Wl,--end-group)
 set_property(TARGET vision.elf APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/link.lds")
+
+add_executable(preview_probe.elf EXCLUDE_FROM_ALL ../tests/preview_probe.cpp camera.cpp vo_sync.cpp)
+foreach(property INCLUDE_DIRECTORIES LINK_DIRECTORIES LINK_LIBRARIES COMPILE_OPTIONS)
+    get_target_property(settings vision.elf ${property})
+    set_property(TARGET preview_probe.elf PROPERTY ${property} "${settings}")
+endforeach()
+target_include_directories(preview_probe.elf PRIVATE .)
+target_link_options(preview_probe.elf PRIVATE -static "-T${CMAKE_CURRENT_SOURCE_DIR}/link.lds"
+    -march=rv64imafdcv -mabi=lp64d -mcmodel=medany -fopenmp)

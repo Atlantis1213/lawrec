@@ -18,7 +18,10 @@ int start_error, stop_error, attr_error;
 int connector_error, close_error, closes;
 k_vb_config pools;
 bool dump_reserved[3];
+uint32_t sync_register;
 }
+int demo::VoSync::enable() { assert(!streaming); regs_ = &sync_register; return 0; }
+int demo::VoSync::stop() { assert(!streaming && !initialized && !bound); regs_ = nullptr; return 0; }
 extern "C" {
 k_s32 kd_mpi_vb_set_config(const k_vb_config *config) {
     pools = *config;

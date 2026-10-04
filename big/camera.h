@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include "vo_sync.h"
 
 namespace demo {
 // This is the sole owner of VB, sensor capture and the preview video layer.
@@ -18,5 +19,6 @@ private:
     bool buffers_ = false, capture_ = false, streaming_ = false;
     bool bound_ = false, display_ = false, preview_ = false;
     uint32_t vb_kib_ = 0;
+    VoSync sync_;
 };
 }
