@@ -30,12 +30,19 @@ int munmap(void *ptr, size_t length) noexcept {
 }
 int main() {
     demo::VoSync sync;
+    uint64_t y = 0, uv = 0;
+    assert(sync.preview_address(y, uv) == -EAGAIN);
     regs[vtth] = bit | 10; regs[frame] = 0x4040;
     open_error = EACCES; assert(sync.enable() == -EACCES && !sync.active());
     open_error = 0; map_error = ENOMEM; assert(sync.enable() == -ENOMEM && !sync.active());
     map_error = 0; assert(sync.enable() == 0 && sync.active());
     assert(regs[frame] == (bit | 0x4040) && regs[vtth] == (bit | 10));
     assert(sync.enable() == 0);
+    assert(sync.preview_address(y, uv) == -EAGAIN);
+    regs[0x118 / 4] = 2;
+    regs[0xa2c / 4] = 0x10000000; regs[0xa30 / 4] = 0x1005dc00;
+    assert(sync.preview_address(y, uv) == 0 && y == 0x10000000 && uv == 0x1005dc00);
+    assert(regs[frame] == (bit | 0x4040) && regs[vtth] == (bit | 10));
     regs[frame] |= 0x80;
     unmap_error = EIO; assert(sync.stop() == -EIO && sync.active());
     unmap_error = 0; assert(sync.stop() == 0 && !sync.active() && regs[frame] == 0x40c0);

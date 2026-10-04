@@ -46,4 +46,15 @@ int VoSync::stop() {
     regs_ = nullptr;
     return 0;
 }
+int VoSync::preview_address(uint64_t &y, uint64_t &uv) const {
+    if (!regs_ || !(regs_[0x118 / 4] & (1U << 1))) return -EAGAIN;
+    // Frozen SDK layer1 address registers; reading does not consume a frame.
+    for (unsigned i = 0; i < 3; ++i) {
+        y = regs_[0xa2c / 4]; uv = regs_[0xa30 / 4];
+        io_fence();
+        if (y == regs_[0xa2c / 4] && uv == regs_[0xa30 / 4])
+            return y >= 0x10000000 && y < 0x20000000 ? 0 : -EIO;
+    }
+    return -EAGAIN;
+}
 }

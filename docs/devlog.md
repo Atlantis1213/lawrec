@@ -562,3 +562,46 @@ Offline development only. No hardware acceptance has been performed for this rep
   and optional face-box check; these remain pending, not certified by metrics.
   RTSP available at rtsp://192.168.123.74:8554/lawrec. Source/documentation commits
   remain local; no automatic push.
+
+### 2026-10-04: Preview Content And Overlay Diagnosis
+
+- Continued the user-authorized SSH/COM5 investigation without changing SDK,
+  frozen LVGL port, touch mapping or display timing. Runtime remained flags=7,
+  error=0, AI/video ~30fps. Serial v showed layer1 frame count advancing,
+  queue watermark=1, frame-end IRQ=0x00100000 and VTTH=0x0010000a.
+- Read-only modetest -M canaan-drm -p and VO registers confirmed UI plane35
+  (OSD7), video layer1 and AI OSD2 enabled, with the video rectangle matching
+  the panel's 480x800 active region. Downloaded the live ARGB4444 UI buffer;
+  its preview region has zero alpha. Linux /dev/mem cannot read the big-core
+  VB region (Bad address), so it cannot produce a camera-layer screenshot.
+- An initial diagnostic-only candidate used SDK VO dump/release. Hardware
+  returned stride=0, then AI/encoding stalled and shutdown retained a VB pool
+  reference. This experiment was rejected, not counted as a working feature.
+  Stopped Linux, exited vision, and performed one synchronized board reboot
+  to clear retained driver resources. No SD reflash, firmware or network
+  configuration edits. Evidence out/board-preview-snapshot-capture.log and
+  out/board-preview-snapshot-api-stop.log. Exact internal SDK defect unproven.
+- Final p command does not call either VO dump API. It reads the frozen
+  layer1 Y/UV address registers via existing VoSync mapping, validates addresses
+  and contiguous NV12 layout, then copies from the still-live camera VB pool
+  before SD I/O. It does not reserve/remove/release any driver frame. Sampling
+  may tear because capture continues; it is not LCD readback. Serial v also
+  reports display-enable, active/video rectangles and programmed Y/UV addresses.
+- Focused tools/build.sh camera, big and verify passed. Real p produced a
+  576000-byte 800x480 NV12 image at /sharefs/lawrec-preview.nv12. Downloaded
+  out/board-preview-readonly.nv12 and rendered out/board-preview-readonly.png:
+  real scene, correct colors and portrait rotation, not a black source frame.
+  AI/video remained ~30.3fps with error=0. Normal stop.sh -> q then returned
+  IPC/OSD/camera/MAPI=0, VB exit=0. Logs out/board-preview-readonly-start.log,
+  board-preview-readonly-capture.log and board-preview-readonly-stop.log.
+- out/board-preview-composite.png combines that video snapshot with the actual
+  downloaded UI alpha buffer, excluding AI OSD. This confirms buffer content
+  and software layout only; not a simultaneous capture or the physical LCD.
+- Promoted the tested candidate to standard bin/vision.elf while stopped;
+  final ELF SHA256 b60fe3700f02f9e2a880f797af3b5025fe1cec756fd12c5b258ec29bf9bb93e6.
+  Original a4cb498 ELF is preserved in the host release tree/archive with
+  matching pre-update hash. This is an incremental application diagnostic
+  update, not a fresh release package; paired Linux code/libs are unchanged.
+  Asked the user whether the actual symptom is black, frozen/misaligned, or
+  now normal. Physical LCD confirmation is still pending; no new visible
+  preview fix is claimed beyond the previously established frame-end IRQ fix.

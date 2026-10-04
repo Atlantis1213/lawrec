@@ -2,6 +2,8 @@
 #include "config.h"
 #include <cerrno>
 #include <cstdio>
+#include <cstring>
+#include <vector>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -154,8 +156,8 @@ int Camera::start() {
     return ret;
 }
 void Camera::log_buffers() const {
-    const unsigned vo[] = {0x3e0, 0x3e4, 0x3ec};
-    read_registers("VO irq", 0x90840000ULL, vo, 3);
+    const unsigned vo[] = {0x118, 0xc0, 0xc4, 0xd0, 0xd4, 0xa2c, 0xa30, 0x3e0, 0x3e4, 0x3ec};
+    read_registers("VO display/irq", 0x90840000ULL, vo, sizeof(vo) / sizeof(vo[0]));
     const char *paths[] = {"/proc/umap/vo", "/proc/umap/vb"};
     for (const char *path : paths) {
         FILE *report = std::fopen(path, "r");
@@ -169,6 +171,40 @@ void Camera::log_buffers() const {
         while (std::fgets(line, sizeof(line), report)) std::fputs(line, stdout);
         std::fclose(report);
     }
+}
+int Camera::snapshot_preview(const char *path) const {
+    if (!preview_ || !bound_) return -EAGAIN;
+    uint64_t y = 0, uv = 0;
+    int ret = sync_.preview_address(y, uv);
+    if (ret) return ret;
+    const unsigned bytes = preview_width * preview_height * 3 / 2;
+    if (uv != y + preview_width * preview_height) return -ENOTSUP;
+    std::printf("[vision-preview] read-only snapshot %ux%u NV12 phys=0x%llx\n",
+        preview_width, preview_height, static_cast<unsigned long long>(y));
+    void *pixels = nullptr;
+    if (!ret) {
+        pixels = kd_mpi_sys_mmap(y, bytes);
+        if (!pixels || pixels == MAP_FAILED) { pixels = nullptr; ret = -ENOMEM; }
+    }
+    if (!ret) {
+        // Pool lifetime is pinned by Camera; streaming may tear this diagnostic
+        // image. Copy before slow SD I/O, without touching SDK dump queues.
+        std::vector<unsigned char> copy(bytes);
+        std::memcpy(copy.data(), pixels, bytes);
+        FILE *file = std::fopen(path, "wb");
+        if (!file) ret = -errno;
+        else {
+            if (std::fwrite(copy.data(), 1, bytes, file) != bytes) ret = -EIO;
+            if (std::fclose(file) && !ret) ret = -EIO;
+            if (ret) std::remove(path);
+        }
+    }
+    if (pixels) {
+        int unmap = checked("preview snapshot unmap", kd_mpi_sys_munmap(pixels, bytes));
+        if (!ret) ret = unmap;
+    }
+    std::printf("[vision-preview] snapshot result=%d path=%s (may tear; before VO rotation, not LCD readback)\n", ret, path);
+    return ret;
 }
 int Camera::set_preview(bool enabled) {
     if (!streaming_) return -EAGAIN;

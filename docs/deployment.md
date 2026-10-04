@@ -129,6 +129,21 @@ SDK 编码器在 IDR 帧会改变 SPS/PPS 的 ID，录像采用 `avc3` 并保留
 这一适配绑定当前冻结 SDK，不能把寄存器写法直接用于其他 SoC/固件。
 大核串口输入 `v` 可读取 VO/VB 状态；正常预览不会将全部视频缓冲引用堆积在 VO。
 
+若预览仍黑屏，大核串口输入 `p` 可保存 `/sharefs/lawrec-preview.nv12`，
+它是 VO 视频层地址对应的 800×480 NV12 只读采样，不使用 SDK VO dump 接口，
+不会申请新的摄像头通道。采样可能撕裂，仅用于确认输入画面，不代表 LCD 实际显示。
+在开发机下载后可转换为竖屏图片：
+
+```sh
+scp -O root@192.168.123.74:/sharefs/lawrec-preview.nv12 /tmp/lawrec-preview.nv12
+ffmpeg -f rawvideo -pixel_format nv12 -video_size 800x480 -i /tmp/lawrec-preview.nv12 \
+  -vf transpose=1 -frames:v 1 /tmp/lawrec-preview.png
+```
+
+当前冻结 SDK 的 `kd_mpi_vo_chn_dump_frame`/release 在本次现场诊断中导致
+RGB 取帧和编码停止、退出时 VB 引用残留，最终版本没有调用这组接口。
+只读采样与 SDK dump 完全不同；排错时不要重新加入该 dump 调用。
+
 界面帧率是实际回调速率，不保证等于屏幕刷新率或客户端播放帧率。
 CPU/RSS 仅统计 `media_service`；`democtl` 中的 `UINT32_MAX` 表示数据不可用。
 VB 数值是配置的缓冲池预算，不是系统实际总占用。

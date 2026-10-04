@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cerrno>
 #include <unistd.h>
+#include <vector>
 
 namespace {
 bool vb_live, bound, initialized, streaming;
@@ -19,9 +20,16 @@ int connector_error, close_error, closes;
 k_vb_config pools;
 bool dump_reserved[3];
 uint32_t sync_register;
+int snapshot_error;
+std::vector<unsigned char> snapshot_pixels(demo::preview_width * demo::preview_height * 3 / 2, 128);
 }
 int demo::VoSync::enable() { assert(!streaming); regs_ = &sync_register; return 0; }
 int demo::VoSync::stop() { assert(!streaming && !initialized && !bound); regs_ = nullptr; return 0; }
+int demo::VoSync::preview_address(uint64_t &y, uint64_t &uv) const {
+    assert(streaming && bound);
+    y = 0x10000000; uv = y + demo::preview_width * demo::preview_height;
+    return snapshot_error;
+}
 extern "C" {
 k_s32 kd_mpi_vb_set_config(const k_vb_config *config) {
     pools = *config;
@@ -61,6 +69,20 @@ k_s32 kd_mpi_vo_set_video_layer_attr(k_vo_layer layer, k_vo_video_layer_attr *at
 k_s32 kd_mpi_vo_enable_video_layer(k_vo_layer) { ++enables; return 0; }
 k_u8 kd_mpi_vo_enable() { return 0; }
 k_s32 kd_mpi_vo_disable_video_layer(k_vo_layer) { ++disables; return 0; }
+k_s32 kd_mpi_vo_chn_dump_frame(k_u32 channel, k_video_frame_info *frame, k_u32 timeout) {
+    (void)channel; (void)frame; (void)timeout;
+    assert(false && "VO dump API perturbs live capture in frozen SDK"); return -ENOTSUP;
+}
+k_s32 kd_mpi_vo_chn_dump_release(k_u32 channel, const k_video_frame_info *) {
+    (void)channel; assert(false); return -ENOTSUP;
+}
+void *kd_mpi_sys_mmap(k_u64 address, k_u32 bytes) {
+    assert(streaming && address == 0x10000000 && bytes == snapshot_pixels.size());
+    return snapshot_pixels.data();
+}
+k_s32 kd_mpi_sys_munmap(void *address, k_u32 bytes) {
+    assert(streaming && address == snapshot_pixels.data() && bytes == snapshot_pixels.size()); return 0;
+}
 k_s32 kd_mpi_vicap_get_sensor_info(k_vicap_sensor_type type, k_vicap_sensor_info *) {
     assert(type == GC2093_MIPI_CSI2_1920X1080_30FPS_10BIT_LINEAR); return 0;
 }
@@ -94,7 +116,18 @@ int main() {
     assert(camera.start() == 0 && streaming && vb_live && !bound);
     assert(closes == 1);
     assert(camera.vb_budget_kib() > 0);
+    assert(camera.snapshot_preview("/tmp/lawrec-camera-fixture.nv12") == -EAGAIN);
     assert(camera.set_preview(true) == 0 && enables == 1);
+    const char *snapshot_path = "/tmp/lawrec-camera-fixture.nv12";
+    assert(camera.snapshot_preview(snapshot_path) == 0);
+    FILE *snapshot = std::fopen(snapshot_path, "rb");
+    assert(snapshot);
+    assert(std::fseek(snapshot, 0, SEEK_END) == 0 && std::ftell(snapshot) == long(snapshot_pixels.size()));
+    std::fclose(snapshot); std::remove(snapshot_path);
+    assert(camera.snapshot_preview("/no-such-directory/preview.nv12") == -ENOENT);
+    snapshot_error = -5;
+    assert(camera.snapshot_preview(snapshot_path) == -5);
+    snapshot_error = 0;
     assert(camera.set_preview(true) == 0 && enables == 1);
     assert(camera.set_preview(false) == 0 && streaming && !bound && stops == 0);
     stop_error = -9;

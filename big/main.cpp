@@ -71,6 +71,7 @@ int main(int argc, char **argv) {
         char input = 0;
         if (read(tty, &input, 1) == 1 && (input == 'q' || input == 'Q')) break;
         if (input == 'v') { camera.log_buffers(); input = 0; }
+        if (input == 'p') { camera.snapshot_preview("/sharefs/lawrec-preview.nv12"); input = 0; }
         demo::Request request;
         if (control.take(request)) {
             int result = 0;
