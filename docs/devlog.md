@@ -372,3 +372,17 @@ Offline development only. No hardware acceptance has been performed for this rep
 - Validation: git diff --check passed; fenced shell commands match HEAD exactly.
   Documentation only: no build, board access or application archive update.
   Hardware acceptance remains pending.
+
+### 2026-10-04: Application Uploaded At Explicit User Request
+
+- The user explicitly requested board upload, overriding the repository's
+  default offline-only workflow for this transfer. Used root@192.168.123.74;
+  uploaded the existing Chinese UI archive from release 1cfd6b830686 into
+  /sharefs and extracted into the previously absent /sharefs/lawrec-demo.
+- Local archive.sha256 and remote archive SHA256 checks passed. Board BusyBox
+  tar rejected -z, so used local gzip -dc piped over SSH to remote tar -xf -.
+  Remote sha256sum -c SHA256SUMS passed for every bundled file.
+- No application started/stopped, old application overwritten, system library,
+  firmware or network changed. The archive and its bundled documentation are
+  unchanged; source-only Chinese documentation updates are not in this archive.
+  Hardware functional acceptance remains pending.
