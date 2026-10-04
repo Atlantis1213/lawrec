@@ -467,3 +467,25 @@ Offline development only. No hardware acceptance has been performed for this rep
   out; no claim that every reconnection scenario or subjective playback passed.
   Face view was empty: visible boxes/landmarks, physical Chinese touch/readability
   and VLC picture/microphone checks still pending. No long/stress acceptance.
+
+### 2026-10-04: Paired Fix Package Deployed And Short Retest
+
+- Clean tools/build.sh package from fc9d28a70edf passed fresh cross-build,
+  frozen/ELF checks and dependency/model/hash closure. Release:
+  out/releases/fc9d28a70edf-20261004T082325Z/lawrec-demo-fc9d28a70edf.tar.gz.
+  Archive SHA256: 869efe8065bf4c120b9caa8b5dfb9b7313772f3dffc539fae0af5eed170c85e8.
+- After Linux stop and confirmed big msh, renamed the entire inactive old tree
+  to /sharefs/lawrec-demo-before-fc9d28a. Extracted the coherent new package at
+  /sharefs/lawrec-demo, including standard bin/vision.elf and paired media/libs;
+  every remote SHA256SUMS entry passed (out/board-final-hashes.log). Old temporary
+  ELF names and stale ad-hoc manifests remain only in the backup, not the new tree.
+- Started standard vision.elf through COM5, ready=0, then Linux start.sh. Enabled
+  AI and RTSP while leaving preview/record OFF. Steady status flags=6, busy=0,
+  error=0, AI ~30.3fps, video ~30fps. LAWREC_RTSP_URL=rtsp://192.168.123.74:8554/lawrec
+  tools/build.sh board-rtsp passed again, receiving 30 H264 NALs and 26 PCMA
+  packets. Logs out/board-final-start.log, board-final-linux.log,
+  board-final-status.log, board-final-rtsp.log. UI is live; no duplicate process.
+- Left that stable AI/RTSP/Chinese UI state running for the user. Record can be
+  demonstrated once if desired; already-decoded 15s board evidence was not
+  repeated. Preview and face OSD visual checks remain unresolved/pending as in
+  acceptance.md. Source committed locally; no automatic remote push.
