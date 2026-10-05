@@ -3,6 +3,9 @@
 Independent implementation of [the development plan](docs/plan.md). The old
 `lawrec` project is reference material, not a build dependency or a second source tree.
 
+Detailed implementation notes are organized by function in
+[docs/features](docs/features/README.md).
+
 ## Current Stage
 
 Three-channel camera/preview, single MobileRetinaFace AI2D/KPU integration,

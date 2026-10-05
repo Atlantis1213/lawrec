@@ -605,3 +605,15 @@ Offline development only. No hardware acceptance has been performed for this rep
   Asked the user whether the actual symptom is black, frozen/misaligned, or
   now normal. Physical LCD confirmation is still pending; no new visible
   preview fix is claimed beyond the previously established frame-end IRQ fix.
+
+### 2026-10-05: Add Function-Level Implementation Documentation
+
+- Added `docs/features/` with separate Markdown documents for architecture,
+  Camera/VICAP/VB/VO, MobileRetinaFace/AI2D/KPU, OSD, IPC, H264 frame queues,
+  VENC/AENC media source, live555 RTSP, MP4/G.711A recording, LVGL/touch,
+  status/metrics, and build/test/deploy.
+- Documentation is based on the current `demo` source tree and records source
+  entry points, data flow, resource ownership, lifecycle, error boundaries,
+  test boundaries, and hardware-acceptance limitations.
+- Updated the root README with the documentation index. Markdown links and
+  whitespace checks passed; no board, SDK, or application binaries were changed.
